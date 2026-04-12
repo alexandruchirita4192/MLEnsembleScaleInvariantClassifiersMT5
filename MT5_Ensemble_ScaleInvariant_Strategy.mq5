@@ -1,0 +1,378 @@
+#property strict
+#property version   "1.00"
+#property description "MT5 EA: scale-invariant ONNX ensemble (MLP + LightGBM + HGB)"
+
+#include <Trade/Trade.mqh>
+
+#resource "mlp.onnx" as uchar MlpModel[]
+#resource "lightgbm.onnx" as uchar LgbmModel[]
+#resource "hgb.onnx" as uchar HgbModel[]
+
+input double InpLots                  = 0.10;
+input double InpEntryProbThreshold    = 0.60;
+input double InpMinProbGap            = 0.15;
+input bool   InpUseAtrStops           = true;
+input double InpStopAtrMultiple       = 1.00;
+input double InpTakeAtrMultiple       = 2.75;
+input int    InpMaxBarsInTrade        = 8;
+input bool   InpCloseOnOppositeSignal = false;
+input bool   InpAllowLong             = true;
+input bool   InpAllowShort            = true;
+
+input double InpMlpWeight             = 0.25;
+input double InpLgbmWeight            = 0.25;
+input double InpHgbWeight             = 0.50;
+
+input long   InpMagic                 = 26042026;
+input bool   InpLog                   = false;
+input bool   InpDebugLog              = false;
+
+const int FEATURE_COUNT = 13;
+const int CLASS_COUNT   = 3;
+const long EXT_INPUT_SHAPE[] = {1, FEATURE_COUNT};
+const long EXT_LABEL_SHAPE[] = {1};
+const long EXT_PROBA_SHAPE[] = {1, CLASS_COUNT};
+
+CTrade trade;
+long g_mlp_handle  = INVALID_HANDLE;
+long g_lgbm_handle = INVALID_HANDLE;
+long g_hgb_handle  = INVALID_HANDLE;
+
+datetime g_last_bar_time = 0;
+int g_bars_in_trade = 0;
+
+double g_w_mlp  = 0.0;
+double g_w_lgbm = 0.0;
+double g_w_hgb  = 0.0;
+
+enum SignalDirection { SIGNAL_SELL = -1, SIGNAL_FLAT = 0, SIGNAL_BUY = 1 };
+
+bool NormalizeWeights()
+{
+   double a = MathMax(0.0, InpMlpWeight);
+   double b = MathMax(0.0, InpLgbmWeight);
+   double c = MathMax(0.0, InpHgbWeight);
+   double s = a + b + c;
+   if(s <= 0.0) return false;
+   g_w_mlp = a / s;
+   g_w_lgbm = b / s;
+   g_w_hgb = c / s;
+   return true;
+}
+
+bool IsNewBar()
+{
+   datetime current_bar_time = iTime(_Symbol, _Period, 0);
+   if(current_bar_time == 0) return false;
+   if(g_last_bar_time == 0)
+   {
+      g_last_bar_time = current_bar_time;
+      return false;
+   }
+   if(current_bar_time != g_last_bar_time)
+   {
+      g_last_bar_time = current_bar_time;
+      return true;
+   }
+   return false;
+}
+
+double Mean(const double &arr[], int start_shift, int count)
+{
+   double sum = 0.0;
+   for(int i = start_shift; i < start_shift + count; i++) sum += arr[i];
+   return sum / count;
+}
+
+double StdDev(const double &arr[], int start_shift, int count)
+{
+   double m = Mean(arr, start_shift, count);
+   double s = 0.0;
+   for(int i = start_shift; i < start_shift + count; i++)
+   {
+      double d = arr[i] - m;
+      s += d * d;
+   }
+   return MathSqrt(s / MathMax(count - 1, 1));
+}
+
+double CalcATR(const MqlRates &rates[], int start_shift, int period)
+{
+   double sum_tr = 0.0;
+   for(int i = start_shift; i < start_shift + period; i++)
+   {
+      double high = rates[i].high;
+      double low = rates[i].low;
+      double prev_close = rates[i + 1].close;
+      double tr1 = high - low;
+      double tr2 = MathAbs(high - prev_close);
+      double tr3 = MathAbs(low - prev_close);
+      double tr = MathMax(tr1, MathMax(tr2, tr3));
+      sum_tr += tr;
+   }
+   return sum_tr / period;
+}
+
+bool BuildFeatureVector(matrixf &features, double &atr14_raw)
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, _Period, 0, 80, rates) < 40) return false;
+
+   double closes[], opens[];
+   ArrayResize(closes, ArraySize(rates));
+   ArrayResize(opens, ArraySize(rates));
+   ArraySetAsSeries(closes, true);
+   ArraySetAsSeries(opens, true);
+
+   for(int i = 0; i < ArraySize(rates); i++)
+   {
+      closes[i] = rates[i].close;
+      opens[i] = rates[i].open;
+   }
+
+   int s = 1;
+   double eps = 1e-12;
+   double c = closes[s];
+   double o = opens[s];
+   double h = rates[s].high;
+   double l = rates[s].low;
+
+   double ret_1  = (closes[s] / (closes[s + 1] + eps)) - 1.0;
+   double ret_3  = (closes[s] / (closes[s + 3] + eps)) - 1.0;
+   double ret_5  = (closes[s] / (closes[s + 5] + eps)) - 1.0;
+   double ret_10 = (closes[s] / (closes[s + 10] + eps)) - 1.0;
+
+   double one_bar_returns[];
+   ArrayResize(one_bar_returns, 30);
+   for(int i = 0; i < 30; i++)
+      one_bar_returns[i] = (closes[s + i] / (closes[s + i + 1] + eps)) - 1.0;
+
+   double vol_10 = StdDev(one_bar_returns, 0, 10);
+   double vol_20 = StdDev(one_bar_returns, 0, 20);
+   double vol_ratio_10_20 = (vol_10 / (vol_20 + eps)) - 1.0;
+
+   double sma_10 = Mean(closes, s, 10);
+   double sma_20 = Mean(closes, s, 20);
+   if(sma_10 == 0.0 || sma_20 == 0.0) return false;
+
+   double dist_sma_10 = (c / (sma_10 + eps)) - 1.0;
+   double dist_sma_20 = (c / (sma_20 + eps)) - 1.0;
+
+   double mean_20 = Mean(closes, s, 20);
+   double std_20  = StdDev(closes, s, 20);
+   double zscore_20 = 0.0;
+   if(std_20 > 0.0) zscore_20 = (c - mean_20) / std_20;
+
+   atr14_raw = CalcATR(rates, s, 14);
+   double atr_pct_14 = atr14_raw / (c + eps);
+   double range_pct_1 = (h - l) / (c + eps);
+   double body_pct_1 = (c - o) / (o + eps);
+
+   features.Resize(1, FEATURE_COUNT);
+   features[0][0]  = (float)ret_1;
+   features[0][1]  = (float)ret_3;
+   features[0][2]  = (float)ret_5;
+   features[0][3]  = (float)ret_10;
+   features[0][4]  = (float)vol_10;
+   features[0][5]  = (float)vol_20;
+   features[0][6]  = (float)vol_ratio_10_20;
+   features[0][7]  = (float)dist_sma_10;
+   features[0][8]  = (float)dist_sma_20;
+   features[0][9]  = (float)zscore_20;
+   features[0][10] = (float)atr_pct_14;
+   features[0][11] = (float)range_pct_1;
+   features[0][12] = (float)body_pct_1;
+   return true;
+}
+
+bool RunSingleModel(long model_handle, const matrixf &x, double &pSell, double &pFlat, double &pBuy)
+{
+   long predicted_label[1];
+   matrixf probs;
+   probs.Resize(1, CLASS_COUNT);
+   if(!OnnxRun(model_handle, 0, x, predicted_label, probs)) return false;
+   pSell = probs[0][0];
+   pFlat = probs[0][1];
+   pBuy = probs[0][2];
+   return true;
+}
+
+bool PredictEnsembleProbabilities(double &pSell, double &pFlat, double &pBuy, double &atr14_raw)
+{
+   matrixf x;
+   if(!BuildFeatureVector(x, atr14_raw)) return false;
+
+   double s1, f1, b1, s2, f2, b2, s3, f3, b3;
+   if(!RunSingleModel(g_mlp_handle, x, s1, f1, b1)) return false;
+   if(!RunSingleModel(g_lgbm_handle, x, s2, f2, b2)) return false;
+   if(!RunSingleModel(g_hgb_handle, x, s3, f3, b3)) return false;
+
+   pSell = g_w_mlp * s1 + g_w_lgbm * s2 + g_w_hgb * s3;
+   pFlat = g_w_mlp * f1 + g_w_lgbm * f2 + g_w_hgb * f3;
+   pBuy  = g_w_mlp * b1 + g_w_lgbm * b2 + g_w_hgb * b3;
+   return true;
+}
+
+SignalDirection SignalFromProbabilities(double pSell, double pFlat, double pBuy)
+{
+   double best = pFlat;
+   double second = -1.0;
+   SignalDirection signal = SIGNAL_FLAT;
+
+   if(pBuy >= pSell && pBuy > best)
+   {
+      second = MathMax(best, pSell);
+      best = pBuy;
+      signal = SIGNAL_BUY;
+   }
+   else if(pSell > pBuy && pSell > best)
+   {
+      second = MathMax(best, pBuy);
+      best = pSell;
+      signal = SIGNAL_SELL;
+   }
+   else
+   {
+      second = MathMax(pBuy, pSell);
+      signal = SIGNAL_FLAT;
+   }
+
+   double gap = best - second;
+
+   if(signal == SIGNAL_BUY)
+   {
+      if(!InpAllowLong) return SIGNAL_FLAT;
+      if(pBuy < InpEntryProbThreshold || gap < InpMinProbGap) return SIGNAL_FLAT;
+      return SIGNAL_BUY;
+   }
+
+   if(signal == SIGNAL_SELL)
+   {
+      if(!InpAllowShort) return SIGNAL_FLAT;
+      if(pSell < InpEntryProbThreshold || gap < InpMinProbGap) return SIGNAL_FLAT;
+      return SIGNAL_SELL;
+   }
+
+   return SIGNAL_FLAT;
+}
+
+bool HasOpenPosition(long &pos_type, double &pos_price)
+{
+   if(!PositionSelect(_Symbol)) return false;
+   if((long)PositionGetInteger(POSITION_MAGIC) != InpMagic) return false;
+   pos_type = (long)PositionGetInteger(POSITION_TYPE);
+   pos_price = PositionGetDouble(POSITION_PRICE_OPEN);
+   return true;
+}
+
+void CloseOpenPosition()
+{
+   if(PositionSelect(_Symbol) && (long)PositionGetInteger(POSITION_MAGIC) == InpMagic)
+      trade.PositionClose(_Symbol);
+}
+
+void OpenTrade(SignalDirection signal, double atr14_raw)
+{
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+
+   double min_stop = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
+   double sl_dist = MathMax(atr14_raw * InpStopAtrMultiple, min_stop);
+   double tp_dist = MathMax(atr14_raw * InpTakeAtrMultiple, min_stop);
+
+   double sl = 0.0;
+   double tp = 0.0;
+
+   trade.SetExpertMagicNumber(InpMagic);
+   trade.SetDeviationInPoints(20);
+
+   if(signal == SIGNAL_BUY)
+   {
+      if(InpUseAtrStops)
+      {
+         sl = ask - sl_dist;
+         tp = ask + tp_dist;
+      }
+      if(trade.Buy(InpLots, _Symbol, ask, sl, tp, "ScaleInvariant ensemble buy"))
+         g_bars_in_trade = 0;
+   }
+   else if(signal == SIGNAL_SELL)
+   {
+      if(InpUseAtrStops)
+      {
+         sl = bid + sl_dist;
+         tp = bid - tp_dist;
+      }
+      if(trade.Sell(InpLots, _Symbol, bid, sl, tp, "ScaleInvariant ensemble sell"))
+         g_bars_in_trade = 0;
+   }
+}
+
+void ManageExistingPosition(SignalDirection signal)
+{
+   long pos_type;
+   double pos_price;
+   if(!HasOpenPosition(pos_type, pos_price)) return;
+
+   g_bars_in_trade++;
+   bool should_close = false;
+
+   if(InpCloseOnOppositeSignal)
+   {
+      if(pos_type == POSITION_TYPE_BUY && signal == SIGNAL_SELL) should_close = true;
+      if(pos_type == POSITION_TYPE_SELL && signal == SIGNAL_BUY) should_close = true;
+   }
+
+   if(!should_close && g_bars_in_trade >= InpMaxBarsInTrade) should_close = true;
+   if(should_close) CloseOpenPosition();
+}
+
+bool InitSingleModel(long &handle_ref, const uchar &buffer[])
+{
+   handle_ref = OnnxCreateFromBuffer(buffer, ONNX_DEFAULT);
+   if(handle_ref == INVALID_HANDLE) return false;
+   if(!OnnxSetInputShape(handle_ref, 0, EXT_INPUT_SHAPE)) return false;
+   if(!OnnxSetOutputShape(handle_ref, 0, EXT_LABEL_SHAPE)) return false;
+   if(!OnnxSetOutputShape(handle_ref, 1, EXT_PROBA_SHAPE)) return false;
+   return true;
+}
+
+int OnInit()
+{
+   trade.SetExpertMagicNumber(InpMagic);
+   if(!NormalizeWeights()) return INIT_PARAMETERS_INCORRECT;
+   if(!InitSingleModel(g_mlp_handle, MlpModel)) return INIT_FAILED;
+   if(!InitSingleModel(g_lgbm_handle, LgbmModel)) return INIT_FAILED;
+   if(!InitSingleModel(g_hgb_handle, HgbModel)) return INIT_FAILED;
+   return INIT_SUCCEEDED;
+}
+
+void OnDeinit(const int reason)
+{
+   if(g_mlp_handle != INVALID_HANDLE) OnnxRelease(g_mlp_handle);
+   if(g_lgbm_handle != INVALID_HANDLE) OnnxRelease(g_lgbm_handle);
+   if(g_hgb_handle != INVALID_HANDLE) OnnxRelease(g_hgb_handle);
+   g_mlp_handle = INVALID_HANDLE;
+   g_lgbm_handle = INVALID_HANDLE;
+   g_hgb_handle = INVALID_HANDLE;
+}
+
+void OnTick()
+{
+   if(!IsNewBar()) return;
+
+   double pSell = 0.0, pFlat = 0.0, pBuy = 0.0, atr14_raw = 0.0;
+   if(!PredictEnsembleProbabilities(pSell, pFlat, pBuy, atr14_raw)) return;
+
+   SignalDirection signal = SignalFromProbabilities(pSell, pFlat, pBuy);
+   ManageExistingPosition(signal);
+
+   long pos_type;
+   double pos_price;
+   if(HasOpenPosition(pos_type, pos_price)) return;
+
+   if(signal == SIGNAL_BUY || signal == SIGNAL_SELL)
+      OpenTrade(signal, atr14_raw);
+}
