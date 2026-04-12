@@ -556,7 +556,7 @@ def main() -> None:
     }
     (output_dir / "ensemble_scale_invariant_metadata.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
-    run_txt = f\"\"\"MODEL: Scale-invariant MLP + LightGBM + HGB ensemble
+    run_txt = f"""MODEL: Scale-invariant MLP + LightGBM + HGB ensemble
 SYMBOL: {args.symbol}
 TIMEFRAME: {args.timeframe}
 HORIZON BARS: {args.horizon_bars}
@@ -576,6 +576,14 @@ FEATURES:
 - atr_pct_14
 - range_pct_1
 - body_pct_1
+
+TRAIN UTC:
+  start: {train_df["time"].iloc[0]}
+  end  : {train_df["time"].iloc[-1]}
+
+TEST UTC:
+  start: {test_df["time"].iloc[0]}
+  end  : {test_df["time"].iloc[-1]}
 
 NORMALIZED WEIGHTS:
   InpMlpWeight  = {weights['mlp']:.6f}
@@ -597,7 +605,7 @@ IMPORTANT:
 - atr_pct_14 = ATR(14) / close
 - range_pct_1 = (high - low) / close
 - body_pct_1  = (close - open) / open
-\"\"\"
+"""
     (output_dir / "run_in_mt5.txt").write_text(run_txt, encoding="utf-8")
 
     print(f"\\nONNX models saved to: {output_dir}")
