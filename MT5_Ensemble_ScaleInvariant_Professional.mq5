@@ -958,8 +958,8 @@ void OnTick()
    LogDebug(StringFormat("OnTick: post-bias probs sell=%.4f flat=%.4f buy=%.4f", pSell, pFlat, pBuy));
 
    SignalInfo info = BuildSignalInfo(pSell, pFlat, pBuy);
-   LogInfo(StringFormat("Signal evaluated: signal=%d pSell=%.5f pFlat=%.5f pBuy=%.5f gap=%.5f",
-                        info.signal, info.pSell, info.pFlat, info.pBuy, info.probGap));
+   LogDebug(StringFormat("Signal evaluated: Probabilities signal=%d pSell=%.5f pFlat=%.5f pBuy=%.5f gap=%.5f entry_prob = %.5f min_gap = %.5f",
+                        info.signal, info.pSell, info.pFlat, info.pBuy, info.probGap, InpEntryProbThreshold, InpMinProbGap));
 
    ManageExistingPosition(info);
 
