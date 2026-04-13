@@ -97,6 +97,18 @@ int g_guard_day_key = -1;
 double g_guard_day_closed_pnl = 0.0;
 bool g_daily_loss_guard_active = false;
 
+void LogInfo(string message)
+  {
+   if(InpLog)
+      Print(message);
+  }
+
+void LogDebug(string message)
+  {
+   if(InpLog && InpDebugLog)
+      Print(message);
+  }
+
 int DayKey(datetime t)
   {
    MqlDateTime dt;
@@ -169,7 +181,10 @@ bool NormalizeWeights()
 
    double s = a + b + c;
    if(s <= 0.0)
+     {
+      LogInfo("NormalizeWeights failed: sum of ensemble weights is <= 0. Check InpMlpWeight/InpLgbmWeight/InpHgbWeight.");
       return false;
+     }
 
    g_w_mlp  = a / s;
    g_w_lgbm = b / s;
@@ -252,7 +267,10 @@ bool SpreadAllows(double atr14_raw)
    double spread_price  = GetCurrentSpreadPrice();
 
    if(mid <= 0.0)
+     {
+      LogInfo("Spread guard blocked entry: mid price <= 0.");
       return false;
+     }
 
    if(!InpUseAdaptiveSpreadGuard)
       return (spread_points <= InpMaxSpreadPoints);
@@ -265,12 +283,15 @@ bool SpreadAllows(double atr14_raw)
    double adaptive_limit_price = MathMin(max_spread_price_from_points, MathMin(max_spread_price_from_pct, max_spread_price_from_atr));
    adaptive_limit_price *= MathMax(1.0, InpAdaptiveSpreadSlack);
 
-   if(InpDebugLog && InpLog)
-      PrintFormat("Spread pts=%.2f spread=%.5f mid=%.5f atr=%.5f limPts=%.5f limPct=%.5f limAtr=%.5f final=%.5f",
+   if(InpLog && InpDebugLog)
+      PrintFormat("Spread check: pts=%.2f spread=%.5f mid=%.5f atr=%.5f limPts=%.5f limPct=%.5f limAtr=%.5f final=%.5f",
                   spread_points, spread_price, mid, atr14_raw,
                   max_spread_price_from_points, max_spread_price_from_pct, max_spread_price_from_atr, adaptive_limit_price);
 
-   return (spread_price <= adaptive_limit_price);
+   bool allow = (spread_price <= adaptive_limit_price);
+   if(!allow)
+      LogInfo("Spread guard blocked entry: current spread is above adaptive limit.");
+   return allow;
   }
 
 bool BuildFeatureVector(matrixf &features, double &atr14_raw)
@@ -278,8 +299,12 @@ bool BuildFeatureVector(matrixf &features, double &atr14_raw)
    MqlRates rates[];
    ArraySetAsSeries(rates, true);
 
-   if(CopyRates(_Symbol, _Period, 0, 80, rates) < 40)
+   int copied = CopyRates(_Symbol, _Period, 0, 80, rates);
+   if(copied < 40)
+     {
+      LogInfo("BuildFeatureVector failed: not enough bars from CopyRates (need >= 40).");
       return false;
+     }
 
    double closes[], opens[];
    ArrayResize(closes, ArraySize(rates));
@@ -317,7 +342,10 @@ bool BuildFeatureVector(matrixf &features, double &atr14_raw)
    double sma_10 = Mean(closes, s, 10);
    double sma_20 = Mean(closes, s, 20);
    if(sma_10 == 0.0 || sma_20 == 0.0)
+     {
+      LogInfo("BuildFeatureVector failed: SMA10 or SMA20 equals zero.");
       return false;
+     }
 
    double dist_sma_10 = (c / (sma_10 + eps)) - 1.0;
    double dist_sma_20 = (c / (sma_20 + eps)) - 1.0;
@@ -358,7 +386,10 @@ bool RunSingleModel(long model_handle, const matrixf &x, double &pSell, double &
    probs.Resize(1, CLASS_COUNT);
 
    if(!OnnxRun(model_handle, 0, x, predicted_label, probs))
+     {
+      LogInfo("RunSingleModel failed: OnnxRun returned false.");
       return false;
+     }
 
    pSell = probs[0][0];
    pFlat = probs[0][1];
@@ -370,22 +401,35 @@ bool PredictEnsembleProbabilities(double &pSell, double &pFlat, double &pBuy, do
   {
    matrixf x;
    if(!BuildFeatureVector(x, atr14_raw))
+     {
+      LogInfo("PredictEnsembleProbabilities aborted: feature vector build failed.");
       return false;
+     }
 
    double s1, f1, b1;
    double s2, f2, b2;
    double s3, f3, b3;
 
    if(!RunSingleModel(g_mlp_handle, x, s1, f1, b1))
+     {
+      LogInfo("PredictEnsembleProbabilities failed: MLP model inference error.");
       return false;
+     }
    if(!RunSingleModel(g_lgbm_handle, x, s2, f2, b2))
+     {
+      LogInfo("PredictEnsembleProbabilities failed: LightGBM model inference error.");
       return false;
+     }
    if(!RunSingleModel(g_hgb_handle, x, s3, f3, b3))
+     {
+      LogInfo("PredictEnsembleProbabilities failed: HGB model inference error.");
       return false;
+     }
 
    pSell = g_w_mlp * s1 + g_w_lgbm * s2 + g_w_hgb * s3;
    pFlat = g_w_mlp * f1 + g_w_lgbm * f2 + g_w_hgb * f3;
    pBuy  = g_w_mlp * b1 + g_w_lgbm * b2 + g_w_hgb * b3;
+   LogDebug(StringFormat("Ensemble probabilities: pSell=%.5f pFlat=%.5f pBuy=%.5f", pSell, pFlat, pBuy));
 
    return true;
   }
@@ -408,6 +452,8 @@ void ApplyHourSoftBias(double &pSell, double &pBuy)
       pSell /= maxv;
       pBuy  /= maxv;
      }
+   LogDebug(StringFormat("Hour soft bias applied (hour=%d preferred=%s): pSell=%.5f pBuy=%.5f",
+                         hour_now, (preferred ? "true" : "false"), pSell, pBuy));
   }
 
 SignalInfo BuildSignalInfo(double pSell, double pFlat, double pBuy)
@@ -448,7 +494,11 @@ SignalInfo BuildSignalInfo(double pSell, double pFlat, double pBuy)
    if(signal == SIGNAL_BUY)
      {
       if(!InpAllowLong || pBuy < InpEntryProbThreshold || info.probGap < InpMinProbGap)
+        {
+         LogDebug(StringFormat("Signal BUY filtered to FLAT: allowLong=%s pBuy=%.5f threshold=%.5f gap=%.5f minGap=%.5f",
+                               (InpAllowLong ? "true" : "false"), pBuy, InpEntryProbThreshold, info.probGap, InpMinProbGap));
          info.signal = SIGNAL_FLAT;
+        }
       else
          info.signal = SIGNAL_BUY;
       return info;
@@ -457,7 +507,11 @@ SignalInfo BuildSignalInfo(double pSell, double pFlat, double pBuy)
    if(signal == SIGNAL_SELL)
      {
       if(!InpAllowShort || pSell < InpEntryProbThreshold || info.probGap < InpMinProbGap)
+        {
+         LogDebug(StringFormat("Signal SELL filtered to FLAT: allowShort=%s pSell=%.5f threshold=%.5f gap=%.5f minGap=%.5f",
+                               (InpAllowShort ? "true" : "false"), pSell, InpEntryProbThreshold, info.probGap, InpMinProbGap));
          info.signal = SIGNAL_FLAT;
+        }
       else
          info.signal = SIGNAL_SELL;
       return info;
@@ -483,7 +537,12 @@ bool HasOpenPosition(long &pos_type, double &pos_price)
 void CloseOpenPosition()
   {
    if(PositionSelect(_Symbol) && (long)PositionGetInteger(POSITION_MAGIC) == InpMagic)
-      trade.PositionClose(_Symbol);
+     {
+      if(trade.PositionClose(_Symbol))
+         LogInfo("Position close request succeeded.");
+      else
+         LogInfo(StringFormat("Position close request failed. retcode=%d", trade.ResultRetcode()));
+     }
   }
 
 double ComputeLotSize(const SignalInfo &info)
@@ -536,7 +595,12 @@ void OpenTrade(const SignalInfo &info, double atr14_raw)
          tp = ask + tp_dist;
         }
       if(trade.Buy(lots, _Symbol, ask, sl, tp, "Pro ensemble buy"))
+        {
          g_bars_in_trade = 0;
+         LogInfo(StringFormat("Opened BUY: lots=%.2f ask=%.5f sl=%.5f tp=%.5f", lots, ask, sl, tp));
+        }
+      else
+         LogInfo(StringFormat("BUY order failed. retcode=%d lots=%.2f", trade.ResultRetcode(), lots));
      }
    else if(info.signal == SIGNAL_SELL)
      {
@@ -546,7 +610,12 @@ void OpenTrade(const SignalInfo &info, double atr14_raw)
          tp = bid - tp_dist;
         }
       if(trade.Sell(lots, _Symbol, bid, sl, tp, "Pro ensemble sell"))
+        {
          g_bars_in_trade = 0;
+         LogInfo(StringFormat("Opened SELL: lots=%.2f bid=%.5f sl=%.5f tp=%.5f", lots, bid, sl, tp));
+        }
+      else
+         LogInfo(StringFormat("SELL order failed. retcode=%d lots=%.2f", trade.ResultRetcode(), lots));
      }
   }
 
@@ -572,7 +641,10 @@ void ManageExistingPosition(const SignalInfo &info)
       should_close = true;
 
    if(should_close)
+     {
+      LogInfo(StringFormat("ManageExistingPosition: closing existing position. bars_in_trade=%d", g_bars_in_trade));
       CloseOpenPosition();
+     }
   }
 
 void ResetDailyLossStateIfNeeded()
@@ -591,7 +663,10 @@ void RefreshClosedDealState()
    ResetDailyLossStateIfNeeded();
 
    if(!HistorySelect(0, TimeCurrent()))
+     {
+      LogInfo("RefreshClosedDealState: HistorySelect failed.");
       return;
+     }
 
    int total = HistoryDealsTotal();
    if(total <= g_last_history_deals_total)
@@ -621,7 +696,10 @@ void RefreshClosedDealState()
          g_guard_day_closed_pnl += net;
 
       if(InpUseCooldownAfterClose)
+        {
          g_cooldown_remaining = InpCooldownBars;
+         LogInfo(StringFormat("Cooldown activated after close: %d bars.", g_cooldown_remaining));
+        }
      }
 
    g_last_history_deals_total = total;
@@ -629,6 +707,7 @@ void RefreshClosedDealState()
    if(InpUseDailyLossGuard && !g_daily_loss_guard_active && g_guard_day_closed_pnl <= -MathAbs(InpDailyLossLimitMoney))
      {
       g_daily_loss_guard_active = true;
+      LogInfo(StringFormat("Daily loss guard activated: dayPnL=%.2f limit=%.2f", g_guard_day_closed_pnl, InpDailyLossLimitMoney));
       if(InpDailyLossFlatOnTrigger)
          CloseOpenPosition();
      }
@@ -643,16 +722,25 @@ void DecrementCooldown()
 bool EntryGuardsAllow(double atr14_raw)
   {
    if(InpUseDailyLossGuard && g_daily_loss_guard_active)
+     {
+      LogInfo("Entry blocked: daily loss guard is active.");
       return false;
+     }
 
    if(InpUseCooldownAfterClose && g_cooldown_remaining > 0)
+     {
+      LogInfo(StringFormat("Entry blocked: cooldown active (%d bars remaining).", g_cooldown_remaining));
       return false;
+     }
 
    if(InpUseHourFilter)
      {
       int h = CurrentServerHour();
       if(!IsHourInRange(h, InpHourStart, InpHourEnd))
+        {
+         LogInfo(StringFormat("Entry blocked: hour filter rejected current hour %d.", h));
          return false;
+        }
      }
 
    if(!SpreadAllows(atr14_raw))
@@ -665,16 +753,28 @@ bool InitSingleModel(long &handle_ref, const uchar &buffer[])
   {
    handle_ref = OnnxCreateFromBuffer(buffer, ONNX_DEFAULT);
    if(handle_ref == INVALID_HANDLE)
+     {
+      LogInfo("InitSingleModel failed: OnnxCreateFromBuffer returned INVALID_HANDLE.");
       return false;
+     }
 
    if(!OnnxSetInputShape(handle_ref, 0, EXT_INPUT_SHAPE))
+     {
+      LogInfo("InitSingleModel failed: OnnxSetInputShape failed.");
       return false;
+     }
 
    if(!OnnxSetOutputShape(handle_ref, 0, EXT_LABEL_SHAPE))
+     {
+      LogInfo("InitSingleModel failed: OnnxSetOutputShape label failed.");
       return false;
+     }
 
    if(!OnnxSetOutputShape(handle_ref, 1, EXT_PROBA_SHAPE))
+     {
+      LogInfo("InitSingleModel failed: OnnxSetOutputShape probabilities failed.");
       return false;
+     }
 
    return true;
   }
@@ -682,6 +782,7 @@ bool InitSingleModel(long &handle_ref, const uchar &buffer[])
 int OnInit()
   {
    trade.SetExpertMagicNumber(InpMagic);
+   LogInfo("OnInit started.");
 
    if(!NormalizeWeights())
       return INIT_PARAMETERS_INCORRECT;
@@ -701,6 +802,9 @@ int OnInit()
       g_last_history_deals_total = HistoryDealsTotal();
    else
       g_last_history_deals_total = 0;
+
+   LogInfo(StringFormat("OnInit complete. weights=(%.3f, %.3f, %.3f) historyDeals=%d",
+                        g_w_mlp, g_w_lgbm, g_w_hgb, g_last_history_deals_total));
 
    return INIT_SUCCEEDED;
   }
@@ -738,16 +842,24 @@ void OnTick()
    ApplyHourSoftBias(pSell, pBuy);
 
    SignalInfo info = BuildSignalInfo(pSell, pFlat, pBuy);
+   LogInfo(StringFormat("Signal evaluated: signal=%d pSell=%.5f pFlat=%.5f pBuy=%.5f gap=%.5f",
+                        info.signal, info.pSell, info.pFlat, info.pBuy, info.probGap));
 
    ManageExistingPosition(info);
 
    long pos_type;
    double pos_price;
    if(HasOpenPosition(pos_type, pos_price))
+     {
+      LogInfo("No new entry: existing position is already open.");
       return;
+     }
 
    if(info.signal == SIGNAL_FLAT)
+     {
+      LogInfo("No entry: signal is FLAT.");
       return;
+     }
 
    if(!EntryGuardsAllow(atr14_raw))
       return;
