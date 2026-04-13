@@ -47,13 +47,29 @@ double g_w_hgb  = 0.0;
 
 enum SignalDirection { SIGNAL_SELL = -1, SIGNAL_FLAT = 0, SIGNAL_BUY = 1 };
 
+void LogInfo(string message)
+{
+   if(InpLog)
+      Print(message);
+}
+
+void LogDebug(string message)
+{
+   if(InpLog && InpDebugLog)
+      Print(message);
+}
+
 bool NormalizeWeights()
 {
    double a = MathMax(0.0, InpMlpWeight);
    double b = MathMax(0.0, InpLgbmWeight);
    double c = MathMax(0.0, InpHgbWeight);
    double s = a + b + c;
-   if(s <= 0.0) return false;
+   if(s <= 0.0)
+   {
+      LogInfo("NormalizeWeights failed: sum of ensemble weights is <= 0.");
+      return false;
+   }
    g_w_mlp = a / s;
    g_w_lgbm = b / s;
    g_w_hgb = c / s;
@@ -117,7 +133,12 @@ bool BuildFeatureVector(matrixf &features, double &atr14_raw)
 {
    MqlRates rates[];
    ArraySetAsSeries(rates, true);
-   if(CopyRates(_Symbol, _Period, 0, 80, rates) < 40) return false;
+   int copied = CopyRates(_Symbol, _Period, 0, 80, rates);
+   if(copied < 40)
+   {
+      LogInfo("BuildFeatureVector failed: not enough bars from CopyRates.");
+      return false;
+   }
 
    double closes[], opens[];
    ArrayResize(closes, ArraySize(rates));
@@ -154,7 +175,11 @@ bool BuildFeatureVector(matrixf &features, double &atr14_raw)
 
    double sma_10 = Mean(closes, s, 10);
    double sma_20 = Mean(closes, s, 20);
-   if(sma_10 == 0.0 || sma_20 == 0.0) return false;
+   if(sma_10 == 0.0 || sma_20 == 0.0)
+   {
+      LogInfo("BuildFeatureVector failed: SMA10 or SMA20 equals zero.");
+      return false;
+   }
 
    double dist_sma_10 = (c / (sma_10 + eps)) - 1.0;
    double dist_sma_20 = (c / (sma_20 + eps)) - 1.0;
@@ -191,7 +216,11 @@ bool RunSingleModel(long model_handle, const matrixf &x, double &pSell, double &
    long predicted_label[1];
    matrixf probs;
    probs.Resize(1, CLASS_COUNT);
-   if(!OnnxRun(model_handle, 0, x, predicted_label, probs)) return false;
+   if(!OnnxRun(model_handle, 0, x, predicted_label, probs))
+   {
+      LogInfo("RunSingleModel failed: OnnxRun returned false.");
+      return false;
+   }
    pSell = probs[0][0];
    pFlat = probs[0][1];
    pBuy = probs[0][2];
@@ -201,7 +230,11 @@ bool RunSingleModel(long model_handle, const matrixf &x, double &pSell, double &
 bool PredictEnsembleProbabilities(double &pSell, double &pFlat, double &pBuy, double &atr14_raw)
 {
    matrixf x;
-   if(!BuildFeatureVector(x, atr14_raw)) return false;
+   if(!BuildFeatureVector(x, atr14_raw))
+   {
+      LogInfo("PredictEnsembleProbabilities aborted: feature vector build failed.");
+      return false;
+   }
 
    double s1, f1, b1, s2, f2, b2, s3, f3, b3;
    if(!RunSingleModel(g_mlp_handle, x, s1, f1, b1)) return false;
@@ -211,6 +244,7 @@ bool PredictEnsembleProbabilities(double &pSell, double &pFlat, double &pBuy, do
    pSell = g_w_mlp * s1 + g_w_lgbm * s2 + g_w_hgb * s3;
    pFlat = g_w_mlp * f1 + g_w_lgbm * f2 + g_w_hgb * f3;
    pBuy  = g_w_mlp * b1 + g_w_lgbm * b2 + g_w_hgb * b3;
+   LogDebug(StringFormat("Ensemble probabilities: pSell=%.5f pFlat=%.5f pBuy=%.5f", pSell, pFlat, pBuy));
    return true;
 }
 
@@ -242,15 +276,33 @@ SignalDirection SignalFromProbabilities(double pSell, double pFlat, double pBuy)
 
    if(signal == SIGNAL_BUY)
    {
-      if(!InpAllowLong) return SIGNAL_FLAT;
-      if(pBuy < InpEntryProbThreshold || gap < InpMinProbGap) return SIGNAL_FLAT;
+      if(!InpAllowLong)
+      {
+         LogInfo("Signal BUY filtered to FLAT: long entries disabled.");
+         return SIGNAL_FLAT;
+      }
+      if(pBuy < InpEntryProbThreshold || gap < InpMinProbGap)
+      {
+         LogInfo(StringFormat("Signal BUY filtered to FLAT: pBuy=%.5f threshold=%.5f gap=%.5f minGap=%.5f",
+                              pBuy, InpEntryProbThreshold, gap, InpMinProbGap));
+         return SIGNAL_FLAT;
+      }
       return SIGNAL_BUY;
    }
 
    if(signal == SIGNAL_SELL)
    {
-      if(!InpAllowShort) return SIGNAL_FLAT;
-      if(pSell < InpEntryProbThreshold || gap < InpMinProbGap) return SIGNAL_FLAT;
+      if(!InpAllowShort)
+      {
+         LogInfo("Signal SELL filtered to FLAT: short entries disabled.");
+         return SIGNAL_FLAT;
+      }
+      if(pSell < InpEntryProbThreshold || gap < InpMinProbGap)
+      {
+         LogInfo(StringFormat("Signal SELL filtered to FLAT: pSell=%.5f threshold=%.5f gap=%.5f minGap=%.5f",
+                              pSell, InpEntryProbThreshold, gap, InpMinProbGap));
+         return SIGNAL_FLAT;
+      }
       return SIGNAL_SELL;
    }
 
@@ -269,7 +321,12 @@ bool HasOpenPosition(long &pos_type, double &pos_price)
 void CloseOpenPosition()
 {
    if(PositionSelect(_Symbol) && (long)PositionGetInteger(POSITION_MAGIC) == InpMagic)
-      trade.PositionClose(_Symbol);
+   {
+      if(trade.PositionClose(_Symbol))
+         LogInfo("Position close request succeeded.");
+      else
+         LogInfo(StringFormat("Position close request failed. retcode=%d", trade.ResultRetcode()));
+   }
 }
 
 void OpenTrade(SignalDirection signal, double atr14_raw)
@@ -296,7 +353,12 @@ void OpenTrade(SignalDirection signal, double atr14_raw)
          tp = ask + tp_dist;
       }
       if(trade.Buy(InpLots, _Symbol, ask, sl, tp, "ScaleInvariant ensemble buy"))
+      {
          g_bars_in_trade = 0;
+         LogInfo(StringFormat("Opened BUY: lots=%.2f ask=%.5f sl=%.5f tp=%.5f", InpLots, ask, sl, tp));
+      }
+      else
+         LogInfo(StringFormat("BUY order failed. retcode=%d lots=%.2f", trade.ResultRetcode(), InpLots));
    }
    else if(signal == SIGNAL_SELL)
    {
@@ -306,7 +368,12 @@ void OpenTrade(SignalDirection signal, double atr14_raw)
          tp = bid - tp_dist;
       }
       if(trade.Sell(InpLots, _Symbol, bid, sl, tp, "ScaleInvariant ensemble sell"))
+      {
          g_bars_in_trade = 0;
+         LogInfo(StringFormat("Opened SELL: lots=%.2f bid=%.5f sl=%.5f tp=%.5f", InpLots, bid, sl, tp));
+      }
+      else
+         LogInfo(StringFormat("SELL order failed. retcode=%d lots=%.2f", trade.ResultRetcode(), InpLots));
    }
 }
 
@@ -326,26 +393,48 @@ void ManageExistingPosition(SignalDirection signal)
    }
 
    if(!should_close && g_bars_in_trade >= InpMaxBarsInTrade) should_close = true;
-   if(should_close) CloseOpenPosition();
+   if(should_close)
+   {
+      LogInfo(StringFormat("ManageExistingPosition: closing existing position. bars_in_trade=%d", g_bars_in_trade));
+      CloseOpenPosition();
+   }
 }
 
 bool InitSingleModel(long &handle_ref, const uchar &buffer[])
 {
    handle_ref = OnnxCreateFromBuffer(buffer, ONNX_DEFAULT);
-   if(handle_ref == INVALID_HANDLE) return false;
-   if(!OnnxSetInputShape(handle_ref, 0, EXT_INPUT_SHAPE)) return false;
-   if(!OnnxSetOutputShape(handle_ref, 0, EXT_LABEL_SHAPE)) return false;
-   if(!OnnxSetOutputShape(handle_ref, 1, EXT_PROBA_SHAPE)) return false;
+   if(handle_ref == INVALID_HANDLE)
+   {
+      LogInfo("InitSingleModel failed: OnnxCreateFromBuffer returned INVALID_HANDLE.");
+      return false;
+   }
+   if(!OnnxSetInputShape(handle_ref, 0, EXT_INPUT_SHAPE))
+   {
+      LogInfo("InitSingleModel failed: OnnxSetInputShape failed.");
+      return false;
+   }
+   if(!OnnxSetOutputShape(handle_ref, 0, EXT_LABEL_SHAPE))
+   {
+      LogInfo("InitSingleModel failed: OnnxSetOutputShape label failed.");
+      return false;
+   }
+   if(!OnnxSetOutputShape(handle_ref, 1, EXT_PROBA_SHAPE))
+   {
+      LogInfo("InitSingleModel failed: OnnxSetOutputShape probabilities failed.");
+      return false;
+   }
    return true;
 }
 
 int OnInit()
 {
    trade.SetExpertMagicNumber(InpMagic);
+   LogInfo("OnInit started.");
    if(!NormalizeWeights()) return INIT_PARAMETERS_INCORRECT;
    if(!InitSingleModel(g_mlp_handle, MlpModel)) return INIT_FAILED;
    if(!InitSingleModel(g_lgbm_handle, LgbmModel)) return INIT_FAILED;
    if(!InitSingleModel(g_hgb_handle, HgbModel)) return INIT_FAILED;
+   LogInfo(StringFormat("OnInit complete. weights=(%.3f, %.3f, %.3f)", g_w_mlp, g_w_lgbm, g_w_hgb));
    return INIT_SUCCEEDED;
 }
 
@@ -367,14 +456,21 @@ void OnTick()
    if(!PredictEnsembleProbabilities(pSell, pFlat, pBuy, atr14_raw)) return;
 
    SignalDirection signal = SignalFromProbabilities(pSell, pFlat, pBuy);
+   LogInfo(StringFormat("Signal evaluated: signal=%d pSell=%.5f pFlat=%.5f pBuy=%.5f", signal, pSell, pFlat, pBuy));
    ManageExistingPosition(signal);
 
    long pos_type;
    double pos_price;
-   if(HasOpenPosition(pos_type, pos_price)) return;
+   if(HasOpenPosition(pos_type, pos_price))
+   {
+      LogInfo("No new entry: existing position is already open.");
+      return;
+   }
 
    if(signal == SIGNAL_BUY || signal == SIGNAL_SELL)
       OpenTrade(signal, atr14_raw);
+   else
+      LogInfo("No entry: signal is FLAT.");
 }
 
 double OnTester()

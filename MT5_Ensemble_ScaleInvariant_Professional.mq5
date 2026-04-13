@@ -186,7 +186,7 @@ bool NormalizeWeights()
    double s = a + b + c;
    if(s <= 0.0)
      {
-      LogInfo("NormalizeWeights: invalid ensemble weights sum <= 0. Check InpMlpWeight/InpLgbmWeight/InpHgbWeight.");
+      LogInfo("NormalizeWeights failed: sum of ensemble weights is <= 0. Check InpMlpWeight/InpLgbmWeight/InpHgbWeight.");
       return false;
      }
 
@@ -272,7 +272,7 @@ bool SpreadAllows(double atr14_raw)
 
    if(mid <= 0.0)
      {
-      LogInfo("SpreadAllows: invalid mid price <= 0.");
+      LogInfo("Spread guard blocked entry: mid price <= 0.");
       return false;
      }
 
@@ -293,16 +293,15 @@ bool SpreadAllows(double atr14_raw)
    double adaptive_limit_price = MathMin(max_spread_price_from_points, MathMin(max_spread_price_from_pct, max_spread_price_from_atr));
    adaptive_limit_price *= MathMax(1.0, InpAdaptiveSpreadSlack);
 
-   if(InpDebugLog && InpLog)
-      PrintFormat("Spread pts=%.2f spread=%.5f mid=%.5f atr=%.5f limPts=%.5f limPct=%.5f limAtr=%.5f final=%.5f",
+   if(InpLog && InpDebugLog)
+      PrintFormat("Spread check: pts=%.2f spread=%.5f mid=%.5f atr=%.5f limPts=%.5f limPct=%.5f limAtr=%.5f final=%.5f",
                   spread_points, spread_price, mid, atr14_raw,
                   max_spread_price_from_points, max_spread_price_from_pct, max_spread_price_from_atr, adaptive_limit_price);
 
-   bool ok_adaptive = (spread_price <= adaptive_limit_price);
-   if(!ok_adaptive)
-      LogInfo(StringFormat("SpreadAllows: blocked by adaptive spread guard spread=%.5f limit=%.5f.",
-                           spread_price, adaptive_limit_price));
-   return ok_adaptive;
+   bool allow = (spread_price <= adaptive_limit_price);
+   if(!allow)
+      LogInfo("Spread guard blocked entry: current spread is above adaptive limit.");
+   return allow;
   }
 
 bool BuildFeatureVector(matrixf &features, double &atr14_raw)
@@ -310,9 +309,10 @@ bool BuildFeatureVector(matrixf &features, double &atr14_raw)
    MqlRates rates[];
    ArraySetAsSeries(rates, true);
 
-   if(CopyRates(_Symbol, _Period, 0, 80, rates) < 40)
+   int copied = CopyRates(_Symbol, _Period, 0, 80, rates);
+   if(copied < 40)
      {
-      LogInfo("BuildFeatureVector: insufficient rate bars from CopyRates, need >= 40.");
+      LogInfo("BuildFeatureVector failed: not enough bars from CopyRates (need >= 40).");
       return false;
      }
 
@@ -353,7 +353,7 @@ bool BuildFeatureVector(matrixf &features, double &atr14_raw)
    double sma_20 = Mean(closes, s, 20);
    if(sma_10 == 0.0 || sma_20 == 0.0)
      {
-      LogInfo("BuildFeatureVector: SMA is zero, cannot compute normalized features.");
+      LogInfo("BuildFeatureVector failed: SMA10 or SMA20 equals zero, cannot compute normalized features.");
       return false;
      }
 
@@ -432,13 +432,14 @@ bool PredictEnsembleProbabilities(double &pSell, double &pFlat, double &pBuy, do
      }
    if(!RunSingleModel(g_hgb_handle, x, s3, f3, b3))
      {
-      LogInfo("PredictEnsembleProbabilities: HGB model inference failed.");
+      LogInfo("PredictEnsembleProbabilities: HistGradientBoosting model inference failed.");
       return false;
      }
 
    pSell = g_w_mlp * s1 + g_w_lgbm * s2 + g_w_hgb * s3;
    pFlat = g_w_mlp * f1 + g_w_lgbm * f2 + g_w_hgb * f3;
    pBuy  = g_w_mlp * b1 + g_w_lgbm * b2 + g_w_hgb * b3;
+   LogDebug(StringFormat("Ensemble probabilities: pSell=%.5f pFlat=%.5f pBuy=%.5f", pSell, pFlat, pBuy));
 
    return true;
   }
@@ -461,6 +462,8 @@ void ApplyHourSoftBias(double &pSell, double &pBuy)
       pSell /= maxv;
       pBuy  /= maxv;
      }
+   LogDebug(StringFormat("Hour soft bias applied (hour=%d preferred=%s): pSell=%.5f pBuy=%.5f",
+                         hour_now, (preferred ? "true" : "false"), pSell, pBuy));
   }
 
 SignalInfo BuildSignalInfo(double pSell, double pFlat, double pBuy)
@@ -602,10 +605,12 @@ void OpenTrade(const SignalInfo &info, double atr14_raw)
          tp = ask + tp_dist;
         }
       if(trade.Buy(lots, _Symbol, ask, sl, tp, "Pro ensemble buy"))
+        {
          g_bars_in_trade = 0;
+         LogInfo(StringFormat("Opened BUY: lots=%.2f ask=%.5f sl=%.5f tp=%.5f", lots, ask, sl, tp));
+        }
       else
-         LogInfo(StringFormat("OpenTrade: BUY failed. lots=%.2f ask=%.5f sl=%.5f tp=%.5f retcode=%d",
-                              lots, ask, sl, tp, trade.ResultRetcode()));
+         LogInfo(StringFormat("BUY order failed. retcode=%d lots=%.2f", trade.ResultRetcode(), lots));
      }
    else if(info.signal == SIGNAL_SELL)
      {
@@ -615,10 +620,12 @@ void OpenTrade(const SignalInfo &info, double atr14_raw)
          tp = bid - tp_dist;
         }
       if(trade.Sell(lots, _Symbol, bid, sl, tp, "Pro ensemble sell"))
+        {
          g_bars_in_trade = 0;
+         LogInfo(StringFormat("Opened SELL: lots=%.2f bid=%.5f sl=%.5f tp=%.5f", lots, bid, sl, tp));
+        }
       else
-         LogInfo(StringFormat("OpenTrade: SELL failed. lots=%.2f bid=%.5f sl=%.5f tp=%.5f retcode=%d",
-                              lots, bid, sl, tp, trade.ResultRetcode()));
+         LogInfo(StringFormat("SELL order failed. retcode=%d lots=%.2f", trade.ResultRetcode(), lots));
      }
   }
 
@@ -647,7 +654,10 @@ void ManageExistingPosition(const SignalInfo &info)
      }
 
    if(should_close)
+     {
+      LogInfo(StringFormat("ManageExistingPosition: closing existing position. bars_in_trade=%d", g_bars_in_trade));
       CloseOpenPosition();
+     }
   }
 
 void ResetDailyLossStateIfNeeded()
@@ -699,7 +709,10 @@ void RefreshClosedDealState()
          g_guard_day_closed_pnl += net;
 
       if(InpUseCooldownAfterClose)
+        {
          g_cooldown_remaining = InpCooldownBars;
+         LogInfo(StringFormat("Cooldown activated after close: %d bars.", g_cooldown_remaining));
+        }
      }
 
    g_last_history_deals_total = total;
@@ -707,6 +720,7 @@ void RefreshClosedDealState()
    if(InpUseDailyLossGuard && !g_daily_loss_guard_active && g_guard_day_closed_pnl <= -MathAbs(InpDailyLossLimitMoney))
      {
       g_daily_loss_guard_active = true;
+      LogInfo(StringFormat("Daily loss guard activated: dayPnL=%.2f limit=%.2f", g_guard_day_closed_pnl, InpDailyLossLimitMoney));
       if(InpDailyLossFlatOnTrigger)
          CloseOpenPosition();
      }
@@ -758,25 +772,25 @@ bool InitSingleModel(long &handle_ref, const uchar &buffer[])
    handle_ref = OnnxCreateFromBuffer(buffer, ONNX_DEFAULT);
    if(handle_ref == INVALID_HANDLE)
      {
-      LogInfo("InitSingleModel: OnnxCreateFromBuffer returned INVALID_HANDLE.");
+      LogInfo("InitSingleModel failed: OnnxCreateFromBuffer returned INVALID_HANDLE.");
       return false;
      }
 
    if(!OnnxSetInputShape(handle_ref, 0, EXT_INPUT_SHAPE))
      {
-      LogInfo("InitSingleModel: failed to set input shape.");
+      LogInfo("InitSingleModel failed: OnnxSetInputShape failed.");
       return false;
      }
 
    if(!OnnxSetOutputShape(handle_ref, 0, EXT_LABEL_SHAPE))
      {
-      LogInfo("InitSingleModel: failed to set label output shape.");
+      LogInfo("InitSingleModel failed: OnnxSetOutputShape label failed.");
       return false;
      }
 
    if(!OnnxSetOutputShape(handle_ref, 1, EXT_PROBA_SHAPE))
      {
-      LogInfo("InitSingleModel: failed to set probability output shape.");
+      LogInfo("InitSingleModel failed: OnnxSetOutputShape probabilities failed.");
       return false;
      }
 
@@ -786,6 +800,7 @@ bool InitSingleModel(long &handle_ref, const uchar &buffer[])
 int OnInit()
   {
    trade.SetExpertMagicNumber(InpMagic);
+   LogInfo("OnInit started.");
 
    if(!NormalizeWeights())
       return INIT_PARAMETERS_INCORRECT;
@@ -805,6 +820,9 @@ int OnInit()
       g_last_history_deals_total = HistoryDealsTotal();
    else
       g_last_history_deals_total = 0;
+
+   LogInfo(StringFormat("OnInit complete. weights=(%.3f, %.3f, %.3f) historyDeals=%d",
+                        g_w_mlp, g_w_lgbm, g_w_hgb, g_last_history_deals_total));
 
    return INIT_SUCCEEDED;
   }
@@ -845,8 +863,8 @@ void OnTick()
    LogDebug(StringFormat("OnTick: post-bias probs sell=%.4f flat=%.4f buy=%.4f", pSell, pFlat, pBuy));
 
    SignalInfo info = BuildSignalInfo(pSell, pFlat, pBuy);
-   LogInfo(StringFormat("OnTick: signal=%d pSell=%.4f pFlat=%.4f pBuy=%.4f probGap=%.4f",
-                        (int)info.signal, info.pSell, info.pFlat, info.pBuy, info.probGap));
+   LogInfo(StringFormat("Signal evaluated: signal=%d pSell=%.5f pFlat=%.5f pBuy=%.5f gap=%.5f",
+                        info.signal, info.pSell, info.pFlat, info.pBuy, info.probGap));
 
    ManageExistingPosition(info);
 
