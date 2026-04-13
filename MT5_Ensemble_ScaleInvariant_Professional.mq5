@@ -1,7 +1,6 @@
 #property strict
 #property version "1.21"
-#property description \
-    "MT5 EA: professional scale-invariant ONNX ensemble (MLP + LightGBM + HGB)"
+#property description "MT5 EA: professional scale-invariant ONNX ensemble (MLP + LightGBM + HGB)"
 #property description "Crypto-aware adaptive spread guard"
 
 #include <Trade/Trade.mqh>
