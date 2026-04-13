@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.20"
+#property version   "1.21"
 #property description "MT5 EA: professional scale-invariant ONNX ensemble (MLP + LightGBM + HGB)"
 #property description "Crypto-aware adaptive spread guard"
 
@@ -31,6 +31,8 @@ input double InpHgbWeight                = 0.50;
 input bool   InpUseHourFilter            = false;
 input int    InpHourStart                = 0;
 input int    InpHourEnd                  = 23;
+input string InpAllowedHoursCsv          = "";
+input string InpDeniedHoursCsv           = "";
 input bool   InpUseHourSoftBias          = false;
 input int    InpSoftHourStart            = 4;
 input int    InpSoftHourEnd              = 18;
@@ -96,6 +98,10 @@ int g_last_history_deals_total = 0;
 int g_guard_day_key = -1;
 double g_guard_day_closed_pnl = 0.0;
 bool g_daily_loss_guard_active = false;
+bool g_allowed_hours_mask[24];
+bool g_denied_hours_mask[24];
+bool g_has_allowed_hours_csv = false;
+bool g_has_denied_hours_csv = false;
 
 void LogInfo(string message)
   {
@@ -204,7 +210,81 @@ bool IsHourInRange(int hour_value, int start_hour, int end_hour)
    if(start_hour <= end_hour)
       return (hour_value >= start_hour && hour_value <= end_hour);
 
-   return (hour_value >= start_hour || hour_value <= end_hour);
+  return (hour_value >= start_hour || hour_value <= end_hour);
+  }
+
+bool IsDigitsOnly(const string value)
+  {
+   int n = StringLen(value);
+   if(n <= 0)
+      return false;
+
+   for(int i = 0; i < n; i++)
+     {
+      ushort ch = StringGetCharacter(value, i);
+      if(ch < '0' || ch > '9')
+         return false;
+     }
+
+   return true;
+  }
+
+bool ParseHoursCsv(const string csv, bool &hours_mask[], bool &has_any_values, const string label)
+  {
+   has_any_values = false;
+   ArrayInitialize(hours_mask, false);
+
+   string normalized = csv;
+   StringReplace(normalized, ";", ",");
+   StringReplace(normalized, " ", "");
+   StringReplace(normalized, "\t", "");
+
+   if(StringLen(normalized) == 0)
+      return true;
+
+   string tokens[];
+   int count = StringSplit(normalized, ',', tokens);
+   if(count <= 0)
+      return true;
+
+   for(int i = 0; i < count; i++)
+     {
+      string token = tokens[i];
+      if(StringLen(token) == 0)
+         continue;
+
+      if(!IsDigitsOnly(token))
+        {
+         LogInfo(StringFormat("ParseHoursCsv: invalid token '%s' in %s. Expected CSV of integers 0..23.", token, label));
+         return false;
+        }
+
+      int hour = (int)StringToInteger(token);
+      if(hour < 0 || hour > 23)
+        {
+         LogInfo(StringFormat("ParseHoursCsv: hour %d out of range in %s. Allowed range is 0..23.", hour, label));
+         return false;
+        }
+
+      hours_mask[hour] = true;
+      has_any_values = true;
+     }
+
+   return true;
+  }
+
+bool IsHourAllowedByMasks(int hour_value)
+  {
+   if(hour_value < 0 || hour_value > 23)
+      return false;
+
+   if(g_has_allowed_hours_csv && !g_allowed_hours_mask[hour_value])
+      return false;
+
+   if(g_denied_hours_mask[hour_value])
+      return false;
+
+   return true;
   }
 
 int CurrentServerHour()
@@ -750,10 +830,19 @@ bool EntryGuardsAllow(double atr14_raw)
    if(InpUseHourFilter)
      {
       int h = CurrentServerHour();
-      if(!IsHourInRange(h, InpHourStart, InpHourEnd))
+      bool allowed_by_csv = IsHourAllowedByMasks(h);
+      bool allowed_by_range = IsHourInRange(h, InpHourStart, InpHourEnd);
+      bool has_csv_rules = (g_has_allowed_hours_csv || g_has_denied_hours_csv);
+
+      bool allowed = (has_csv_rules ? allowed_by_csv : allowed_by_range);
+      if(!allowed)
         {
-         LogInfo(StringFormat("EntryGuardsAllow: blocked by hour filter, current=%d allowed=%d..%d.",
-                              h, InpHourStart, InpHourEnd));
+         if(has_csv_rules)
+            LogInfo(StringFormat("EntryGuardsAllow: blocked by hour CSV filter, current=%d allowedCsv='%s' deniedCsv='%s'.",
+                                 h, InpAllowedHoursCsv, InpDeniedHoursCsv));
+         else
+            LogInfo(StringFormat("EntryGuardsAllow: blocked by hour range filter, current=%d allowed=%d..%d.",
+                                 h, InpHourStart, InpHourEnd));
          return false;
         }
      }
@@ -803,6 +892,12 @@ int OnInit()
    LogInfo("OnInit started.");
 
    if(!NormalizeWeights())
+      return INIT_PARAMETERS_INCORRECT;
+
+   if(!ParseHoursCsv(InpAllowedHoursCsv, g_allowed_hours_mask, g_has_allowed_hours_csv, "InpAllowedHoursCsv"))
+      return INIT_PARAMETERS_INCORRECT;
+
+   if(!ParseHoursCsv(InpDeniedHoursCsv, g_denied_hours_mask, g_has_denied_hours_csv, "InpDeniedHoursCsv"))
       return INIT_PARAMETERS_INCORRECT;
 
    if(!InitSingleModel(g_mlp_handle, MlpModel))
