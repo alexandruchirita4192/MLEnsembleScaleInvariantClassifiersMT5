@@ -97,6 +97,18 @@ int g_guard_day_key = -1;
 double g_guard_day_closed_pnl = 0.0;
 bool g_daily_loss_guard_active = false;
 
+void LogInfo(string message)
+  {
+   if(InpLog)
+      Print(message);
+  }
+
+void LogDebug(string message)
+  {
+   if(InpLog && InpDebugLog)
+      Print(message);
+  }
+
 int DayKey(datetime t)
   {
    MqlDateTime dt;
@@ -108,11 +120,15 @@ bool IsNewBar()
   {
    datetime current_bar_time = iTime(_Symbol, _Period, 0);
    if(current_bar_time == 0)
+     {
+      LogDebug("IsNewBar: iTime returned 0, skipping tick.");
       return false;
+     }
 
    if(g_last_bar_time == 0)
      {
       g_last_bar_time = current_bar_time;
+      LogDebug("IsNewBar: initialized last bar timestamp, waiting for next bar.");
       return false;
      }
 
@@ -169,7 +185,10 @@ bool NormalizeWeights()
 
    double s = a + b + c;
    if(s <= 0.0)
+     {
+      LogInfo("NormalizeWeights: invalid ensemble weights sum <= 0. Check InpMlpWeight/InpLgbmWeight/InpHgbWeight.");
       return false;
+     }
 
    g_w_mlp  = a / s;
    g_w_lgbm = b / s;
@@ -252,10 +271,19 @@ bool SpreadAllows(double atr14_raw)
    double spread_price  = GetCurrentSpreadPrice();
 
    if(mid <= 0.0)
+     {
+      LogInfo("SpreadAllows: invalid mid price <= 0.");
       return false;
+     }
 
    if(!InpUseAdaptiveSpreadGuard)
-      return (spread_points <= InpMaxSpreadPoints);
+     {
+      bool ok_points = (spread_points <= InpMaxSpreadPoints);
+      if(!ok_points)
+         LogInfo(StringFormat("SpreadAllows: blocked by fixed spread guard %.2f > %.2f points.",
+                              spread_points, InpMaxSpreadPoints));
+      return ok_points;
+     }
 
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    double max_spread_price_from_points = InpMaxSpreadPoints * point;
@@ -270,7 +298,11 @@ bool SpreadAllows(double atr14_raw)
                   spread_points, spread_price, mid, atr14_raw,
                   max_spread_price_from_points, max_spread_price_from_pct, max_spread_price_from_atr, adaptive_limit_price);
 
-   return (spread_price <= adaptive_limit_price);
+   bool ok_adaptive = (spread_price <= adaptive_limit_price);
+   if(!ok_adaptive)
+      LogInfo(StringFormat("SpreadAllows: blocked by adaptive spread guard spread=%.5f limit=%.5f.",
+                           spread_price, adaptive_limit_price));
+   return ok_adaptive;
   }
 
 bool BuildFeatureVector(matrixf &features, double &atr14_raw)
@@ -279,7 +311,10 @@ bool BuildFeatureVector(matrixf &features, double &atr14_raw)
    ArraySetAsSeries(rates, true);
 
    if(CopyRates(_Symbol, _Period, 0, 80, rates) < 40)
+     {
+      LogInfo("BuildFeatureVector: insufficient rate bars from CopyRates, need >= 40.");
       return false;
+     }
 
    double closes[], opens[];
    ArrayResize(closes, ArraySize(rates));
@@ -317,7 +352,10 @@ bool BuildFeatureVector(matrixf &features, double &atr14_raw)
    double sma_10 = Mean(closes, s, 10);
    double sma_20 = Mean(closes, s, 20);
    if(sma_10 == 0.0 || sma_20 == 0.0)
+     {
+      LogInfo("BuildFeatureVector: SMA is zero, cannot compute normalized features.");
       return false;
+     }
 
    double dist_sma_10 = (c / (sma_10 + eps)) - 1.0;
    double dist_sma_20 = (c / (sma_20 + eps)) - 1.0;
@@ -358,7 +396,10 @@ bool RunSingleModel(long model_handle, const matrixf &x, double &pSell, double &
    probs.Resize(1, CLASS_COUNT);
 
    if(!OnnxRun(model_handle, 0, x, predicted_label, probs))
+     {
+      LogInfo("RunSingleModel: OnnxRun failed.");
       return false;
+     }
 
    pSell = probs[0][0];
    pFlat = probs[0][1];
@@ -370,18 +411,30 @@ bool PredictEnsembleProbabilities(double &pSell, double &pFlat, double &pBuy, do
   {
    matrixf x;
    if(!BuildFeatureVector(x, atr14_raw))
+     {
+      LogInfo("PredictEnsembleProbabilities: feature vector build failed.");
       return false;
+     }
 
    double s1, f1, b1;
    double s2, f2, b2;
    double s3, f3, b3;
 
    if(!RunSingleModel(g_mlp_handle, x, s1, f1, b1))
+     {
+      LogInfo("PredictEnsembleProbabilities: MLP model inference failed.");
       return false;
+     }
    if(!RunSingleModel(g_lgbm_handle, x, s2, f2, b2))
+     {
+      LogInfo("PredictEnsembleProbabilities: LightGBM model inference failed.");
       return false;
+     }
    if(!RunSingleModel(g_hgb_handle, x, s3, f3, b3))
+     {
+      LogInfo("PredictEnsembleProbabilities: HGB model inference failed.");
       return false;
+     }
 
    pSell = g_w_mlp * s1 + g_w_lgbm * s2 + g_w_hgb * s3;
    pFlat = g_w_mlp * f1 + g_w_lgbm * f2 + g_w_hgb * f3;
@@ -448,7 +501,11 @@ SignalInfo BuildSignalInfo(double pSell, double pFlat, double pBuy)
    if(signal == SIGNAL_BUY)
      {
       if(!InpAllowLong || pBuy < InpEntryProbThreshold || info.probGap < InpMinProbGap)
+        {
+         LogInfo(StringFormat("BuildSignalInfo: BUY rejected allowLong=%d pBuy=%.4f threshold=%.4f gap=%.4f minGap=%.4f",
+                              (int)InpAllowLong, pBuy, InpEntryProbThreshold, info.probGap, InpMinProbGap));
          info.signal = SIGNAL_FLAT;
+        }
       else
          info.signal = SIGNAL_BUY;
       return info;
@@ -457,7 +514,11 @@ SignalInfo BuildSignalInfo(double pSell, double pFlat, double pBuy)
    if(signal == SIGNAL_SELL)
      {
       if(!InpAllowShort || pSell < InpEntryProbThreshold || info.probGap < InpMinProbGap)
+        {
+         LogInfo(StringFormat("BuildSignalInfo: SELL rejected allowShort=%d pSell=%.4f threshold=%.4f gap=%.4f minGap=%.4f",
+                              (int)InpAllowShort, pSell, InpEntryProbThreshold, info.probGap, InpMinProbGap));
          info.signal = SIGNAL_FLAT;
+        }
       else
          info.signal = SIGNAL_SELL;
       return info;
@@ -483,7 +544,12 @@ bool HasOpenPosition(long &pos_type, double &pos_price)
 void CloseOpenPosition()
   {
    if(PositionSelect(_Symbol) && (long)PositionGetInteger(POSITION_MAGIC) == InpMagic)
-      trade.PositionClose(_Symbol);
+     {
+      if(!trade.PositionClose(_Symbol))
+         LogInfo(StringFormat("CloseOpenPosition: PositionClose failed. retcode=%d", trade.ResultRetcode()));
+      else
+         LogInfo("CloseOpenPosition: position closed.");
+     }
   }
 
 double ComputeLotSize(const SignalInfo &info)
@@ -537,6 +603,9 @@ void OpenTrade(const SignalInfo &info, double atr14_raw)
         }
       if(trade.Buy(lots, _Symbol, ask, sl, tp, "Pro ensemble buy"))
          g_bars_in_trade = 0;
+      else
+         LogInfo(StringFormat("OpenTrade: BUY failed. lots=%.2f ask=%.5f sl=%.5f tp=%.5f retcode=%d",
+                              lots, ask, sl, tp, trade.ResultRetcode()));
      }
    else if(info.signal == SIGNAL_SELL)
      {
@@ -547,6 +616,9 @@ void OpenTrade(const SignalInfo &info, double atr14_raw)
         }
       if(trade.Sell(lots, _Symbol, bid, sl, tp, "Pro ensemble sell"))
          g_bars_in_trade = 0;
+      else
+         LogInfo(StringFormat("OpenTrade: SELL failed. lots=%.2f bid=%.5f sl=%.5f tp=%.5f retcode=%d",
+                              lots, bid, sl, tp, trade.ResultRetcode()));
      }
   }
 
@@ -569,7 +641,10 @@ void ManageExistingPosition(const SignalInfo &info)
      }
 
    if(!should_close && g_bars_in_trade >= InpMaxBarsInTrade)
+     {
       should_close = true;
+      LogDebug(StringFormat("ManageExistingPosition: max bars in trade reached (%d).", g_bars_in_trade));
+     }
 
    if(should_close)
       CloseOpenPosition();
@@ -591,7 +666,10 @@ void RefreshClosedDealState()
    ResetDailyLossStateIfNeeded();
 
    if(!HistorySelect(0, TimeCurrent()))
+     {
+      LogInfo("RefreshClosedDealState: HistorySelect failed.");
       return;
+     }
 
    int total = HistoryDealsTotal();
    if(total <= g_last_history_deals_total)
@@ -643,20 +721,34 @@ void DecrementCooldown()
 bool EntryGuardsAllow(double atr14_raw)
   {
    if(InpUseDailyLossGuard && g_daily_loss_guard_active)
+     {
+      LogInfo(StringFormat("EntryGuardsAllow: blocked by daily loss guard (closed pnl %.2f, limit %.2f).",
+                           g_guard_day_closed_pnl, -MathAbs(InpDailyLossLimitMoney)));
       return false;
+     }
 
    if(InpUseCooldownAfterClose && g_cooldown_remaining > 0)
+     {
+      LogInfo(StringFormat("EntryGuardsAllow: blocked by cooldown, bars remaining=%d.", g_cooldown_remaining));
       return false;
+     }
 
    if(InpUseHourFilter)
      {
       int h = CurrentServerHour();
       if(!IsHourInRange(h, InpHourStart, InpHourEnd))
+        {
+         LogInfo(StringFormat("EntryGuardsAllow: blocked by hour filter, current=%d allowed=%d..%d.",
+                              h, InpHourStart, InpHourEnd));
          return false;
+        }
      }
 
    if(!SpreadAllows(atr14_raw))
+     {
+      LogInfo("EntryGuardsAllow: blocked by spread guard.");
       return false;
+     }
 
    return true;
   }
@@ -665,16 +757,28 @@ bool InitSingleModel(long &handle_ref, const uchar &buffer[])
   {
    handle_ref = OnnxCreateFromBuffer(buffer, ONNX_DEFAULT);
    if(handle_ref == INVALID_HANDLE)
+     {
+      LogInfo("InitSingleModel: OnnxCreateFromBuffer returned INVALID_HANDLE.");
       return false;
+     }
 
    if(!OnnxSetInputShape(handle_ref, 0, EXT_INPUT_SHAPE))
+     {
+      LogInfo("InitSingleModel: failed to set input shape.");
       return false;
+     }
 
    if(!OnnxSetOutputShape(handle_ref, 0, EXT_LABEL_SHAPE))
+     {
+      LogInfo("InitSingleModel: failed to set label output shape.");
       return false;
+     }
 
    if(!OnnxSetOutputShape(handle_ref, 1, EXT_PROBA_SHAPE))
+     {
+      LogInfo("InitSingleModel: failed to set probability output shape.");
       return false;
+     }
 
    return true;
   }
@@ -735,23 +839,35 @@ void OnTick()
    if(!PredictEnsembleProbabilities(pSell, pFlat, pBuy, atr14_raw))
       return;
 
+   LogDebug(StringFormat("OnTick: raw probs sell=%.4f flat=%.4f buy=%.4f atr=%.5f", pSell, pFlat, pBuy, atr14_raw));
+
    ApplyHourSoftBias(pSell, pBuy);
+   LogDebug(StringFormat("OnTick: post-bias probs sell=%.4f flat=%.4f buy=%.4f", pSell, pFlat, pBuy));
 
    SignalInfo info = BuildSignalInfo(pSell, pFlat, pBuy);
+   LogInfo(StringFormat("OnTick: signal=%d pSell=%.4f pFlat=%.4f pBuy=%.4f probGap=%.4f",
+                        (int)info.signal, info.pSell, info.pFlat, info.pBuy, info.probGap));
 
    ManageExistingPosition(info);
 
    long pos_type;
    double pos_price;
    if(HasOpenPosition(pos_type, pos_price))
+     {
+      LogDebug("OnTick: skipping entry, position already open.");
       return;
+     }
 
    if(info.signal == SIGNAL_FLAT)
+     {
+      LogInfo("OnTick: no entry, signal is FLAT after thresholds/filters.");
       return;
+     }
 
    if(!EntryGuardsAllow(atr14_raw))
       return;
 
+   LogInfo(StringFormat("OnTick: opening trade for signal=%d.", (int)info.signal));
    OpenTrade(info, atr14_raw);
   }
 
