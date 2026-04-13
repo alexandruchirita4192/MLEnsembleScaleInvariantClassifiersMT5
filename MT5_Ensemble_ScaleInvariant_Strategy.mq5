@@ -1,7 +1,6 @@
 #property strict
 #property version "1.00"
-#property description \
-    "MT5 EA: scale-invariant ONNX ensemble (MLP + LightGBM + HGB)"
+#property description "MT5 EA: scale-invariant ONNX ensemble (MLP + LightGBM + HGB)"
 
 #include <Trade/Trade.mqh>
 
