@@ -672,7 +672,7 @@ void OpenTrade(const SignalInfo &info, double atr14_raw) {
       sl = ask - sl_dist;
       tp = ask + tp_dist;
     }
-    if (trade.Buy(lots, _Symbol, ask, sl, tp, "Pro ensemble buy")) {
+    if (trade.Buy(lots, _Symbol, ask, sl, tp, "Pro ensemble[5] buy")) {
       g_bars_in_trade = 0;
       LogInfo(StringFormat("Opened BUY: lots=%.2f ask=%.5f sl=%.5f tp=%.5f",
                            lots, ask, sl, tp));
@@ -684,7 +684,7 @@ void OpenTrade(const SignalInfo &info, double atr14_raw) {
       sl = bid + sl_dist;
       tp = bid - tp_dist;
     }
-    if (trade.Sell(lots, _Symbol, bid, sl, tp, "Pro ensemble sell")) {
+    if (trade.Sell(lots, _Symbol, bid, sl, tp, "Pro ensemble[5] sell")) {
       g_bars_in_trade = 0;
       LogInfo(StringFormat("Opened SELL: lots=%.2f bid=%.5f sl=%.5f tp=%.5f",
                            lots, bid, sl, tp));
