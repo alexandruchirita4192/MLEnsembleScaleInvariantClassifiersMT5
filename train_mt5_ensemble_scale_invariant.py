@@ -11,7 +11,8 @@ import pandas as pd
 from lightgbm import LGBMClassifier
 from onnxmltools import convert_lightgbm
 from onnxmltools.convert.common.data_types import FloatTensorType as OnnxToolsFloatTensorType
-from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.ensemble import HistGradientBoostingClassifier, ExtraTreesClassifier
+from sklearn.linear_model import RidgeClassifier
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, confusion_matrix
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.neural_network import MLPClassifier
@@ -221,57 +222,198 @@ def make_hgb(random_state: int = 42) -> HistGradientBoostingClassifier:
     )
 
 
+# -----------------------------------------------------------------------------
+# Additional model factories for Extra Trees and Ridge classifiers
+#
+# The ensemble originally included MLP, LightGBM and HGB models.  This patch
+# adds support for Extra Trees and Ridge classifiers to broaden the ensemble.
+# Both of these models are trained on the same set of 13 scale‑invariant
+# features defined in FEATURE_COLS.  Hyperparameters are borrowed from the
+# standalone training scripts for Extra Trees and Ridge, ensuring comparable
+# behaviour when ported to MT5 via ONNX.
+
+def make_extratrees(random_state: int = 42) -> ExtraTreesClassifier:
+    """
+    Construct an ExtraTreesClassifier with sensible defaults.
+
+    The parameters mirror those used in the separate Extra Trees training
+    script.  In particular, a fairly large forest (600 trees) is built with
+    moderate depth and leaf constraints to reduce overfitting.  Feature
+    subsampling is set to "sqrt" to encourage diversity across trees.
+    """
+    return ExtraTreesClassifier(
+        n_estimators=600,
+        max_depth=8,
+        min_samples_leaf=12,
+        min_samples_split=40,
+        max_features="sqrt",
+        bootstrap=False,
+        random_state=random_state,
+        n_jobs=-1,
+    )
+
+
+def make_ridge(random_state: int = 42) -> Pipeline:
+    """
+    Build a pipeline of StandardScaler followed by a RidgeClassifier.
+
+    The Ridge classifier does not natively expose probability estimates, but
+    decision function scores can be converted to probabilities via the softmax
+    transformation when forming the ensemble.  Class weights are balanced to
+    account for class imbalance in the training data.
+    """
+    return Pipeline(
+        steps=[
+            ("scaler", StandardScaler()),
+            (
+                "ridge",
+                RidgeClassifier(
+                    alpha=1.0,
+                    class_weight="balanced",
+                    fit_intercept=True,
+                    random_state=random_state,
+                ),
+            ),
+        ]
+    )
+
+
 def fit_models(train_df: pd.DataFrame, random_state: int = 42):
+    """
+    Train all constituent models on the supplied training data.
+
+    Each model is fitted on the 13‑dimensional feature space defined by
+    FEATURE_COLS.  Categorical targets are provided as encoded integers
+    (0=sell, 1=flat, 2=buy) via the "target_class_enc" column.  Models
+    requiring specific input formats (e.g. LightGBM expecting a DataFrame)
+    are handled accordingly.
+    """
     X_df = train_df[FEATURE_COLS].astype(np.float32)
     X_np = X_df.to_numpy(dtype=np.float32)
     y = train_df["target_class_enc"].to_numpy(dtype=np.int64)
 
+    # MLP
     mlp = make_mlp(random_state)
     mlp.fit(X_np, y)
 
+    # LightGBM
     lgbm = make_lgbm(random_state)
     lgbm.fit(X_df, y)
 
+    # HistGradientBoosting
     hgb = make_hgb(random_state)
     hgb.fit(X_np, y)
 
-    return {"mlp": mlp, "lgbm": lgbm, "hgb": hgb}
+    # Extra Trees
+    extratrees = make_extratrees(random_state)
+    extratrees.fit(X_np, y)
+
+    # Ridge (with StandardScaler)
+    ridge = make_ridge(random_state)
+    ridge.fit(X_np, y)
+
+    return {
+        "mlp": mlp,
+        "lgbm": lgbm,
+        "hgb": hgb,
+        "extratrees": extratrees,
+        "ridge": ridge,
+    }
 
 
-def normalize_weights(mlp_weight: float, lgbm_weight: float, hgb_weight: float) -> Dict[str, float]:
+def normalize_weights(
+    mlp_weight: float,
+    lgbm_weight: float,
+    hgb_weight: float,
+    extratrees_weight: float,
+    ridge_weight: float,
+) -> Dict[str, float]:
+    """
+    Normalize ensemble weights across all models.
+
+    The ensemble may contain up to five model types.  All weights are
+    coerced to be non‑negative.  At least one weight must be positive, else
+    a ValueError is raised.  Returned weights sum to one across the set
+    {mlp, lgbm, hgb, extratrees, ridge}.
+    """
     raw = {
         "mlp": float(max(0.0, mlp_weight)),
         "lgbm": float(max(0.0, lgbm_weight)),
         "hgb": float(max(0.0, hgb_weight)),
+        "extratrees": float(max(0.0, extratrees_weight)),
+        "ridge": float(max(0.0, ridge_weight)),
     }
-    s = raw["mlp"] + raw["lgbm"] + raw["hgb"]
+    s = sum(raw.values())
     if s <= 0.0:
         raise ValueError("At least one weight must be > 0.")
     return {k: v / s for k, v in raw.items()}
 
 
 def weighted_probabilities(models, X: np.ndarray, weights: Dict[str, float]) -> np.ndarray:
-    X_df = pd.DataFrame(X, columns=FEATURE_COLS, dtype=np.float32)
-    out = np.zeros((len(X), 3), dtype=np.float64)
+    """
+    Compute a weighted sum of class probabilities across all models.
 
+    For models exposing ``predict_proba`` (e.g. MLP, LightGBM, HGB and
+    Extra Trees) probabilities are used directly.  For models lacking
+    ``predict_proba`` but exposing ``decision_function`` (e.g. the Ridge
+    classifier pipeline), softmax is applied to the decision scores to
+    generate probability distributions.  Each model's class order is
+    aligned to the global class constants SELL_CLASS, FLAT_CLASS and
+    BUY_CLASS via ENC_TO_CLASS before weighting.
+    """
+    out = np.zeros((len(X), 3), dtype=np.float64)
+    # For LightGBM we need a DataFrame; other models work with numpy arrays
+    X_df = pd.DataFrame(X, columns=FEATURE_COLS, dtype=np.float32)
     for name, model in models.items():
-        if weights[name] <= 0.0:
+        weight = float(weights.get(name, 0.0))
+        if weight <= 0.0:
             continue
 
+        # Determine how to obtain probabilities
         if isinstance(model, LGBMClassifier):
+            # LightGBM expects a DataFrame for predict_proba
             p = model.predict_proba(X_df)
             classes = model.classes_
-        else:
+        elif hasattr(model, "predict_proba"):
+            # Pipelines (e.g. MLP) and ExtraTrees provide predict_proba directly
             p = model.predict_proba(X)
-            classes = model.classes_ if hasattr(model, "classes_") else model.named_steps["mlp"].classes_
+            if hasattr(model, "classes_"):
+                classes = model.classes_
+            elif hasattr(model, "named_steps") and "mlp" in model.named_steps:
+                classes = model.named_steps["mlp"].classes_
+            else:
+                raise ValueError(f"Cannot determine classes for model {name}")
+        elif hasattr(model, "decision_function"):
+            # RidgeClassifier pipeline exposes decision_function; convert to probabilities
+            scores = model.decision_function(X)
+            if scores.ndim == 1 or scores.shape[1] != len(CLASS_ORDER):
+                raise ValueError(
+                    f"decision_function returned unexpected shape for model {name}: {scores.shape}"
+                )
+            # Apply row‑wise softmax to scores
+            scores_max = scores.max(axis=1, keepdims=True)
+            exps = np.exp(scores - scores_max)
+            p = exps / exps.sum(axis=1, keepdims=True)
+            # Extract classes from the underlying estimator
+            if hasattr(model, "classes_"):
+                classes = model.classes_
+            elif hasattr(model, "named_steps") and "ridge" in model.named_steps:
+                classes = model.named_steps["ridge"].classes_
+            else:
+                raise ValueError(f"Cannot determine classes for model {name}")
+        else:
+            raise ValueError(f"Model {name} does not support predict_proba or decision_function")
 
+        # Align classes to SELL/FLAT/BUY order using ENC_TO_CLASS
         class_to_idx = {ENC_TO_CLASS[int(c)]: i for i, c in enumerate(classes)}
-        aligned = np.column_stack([
-            p[:, class_to_idx[SELL_CLASS]],
-            p[:, class_to_idx[FLAT_CLASS]],
-            p[:, class_to_idx[BUY_CLASS]],
-        ])
-        out += weights[name] * aligned
+        aligned = np.column_stack(
+            [
+                p[:, class_to_idx[SELL_CLASS]],
+                p[:, class_to_idx[FLAT_CLASS]],
+                p[:, class_to_idx[BUY_CLASS]],
+            ]
+        )
+        out += weight * aligned
 
     return out
 
@@ -437,6 +579,8 @@ def export_model_to_onnx(model, output_path: Path, feature_count: int) -> None:
         initial_types = [("float_input", OnnxToolsFloatTensorType([1, feature_count]))]
         onx = convert_lightgbm(model, initial_types=initial_types, target_opset=15, zipmap=False)
     elif isinstance(model, HistGradientBoostingClassifier):
+        # HistGradientBoostingClassifier requires special handling of boolean
+        # attributes for ONNX; reuse the existing workaround.
         initial_types = [("float_input", SklFloatTensorType([1, feature_count]))]
         options = {id(model): {"zipmap": False}}
         original_make_attribute, patched_make_attribute = _coerce_bool_attributes_for_onnx()
@@ -446,9 +590,15 @@ def export_model_to_onnx(model, output_path: Path, feature_count: int) -> None:
         finally:
             onnx_helper.make_attribute = original_make_attribute
     else:
+        # Default conversion for other sklearn models (including ExtraTrees and Ridge pipelines)
         initial_types = [("float_input", SklFloatTensorType([1, feature_count]))]
         options = {id(model): {"zipmap": False}}
-        onx = convert_sklearn(model, initial_types=initial_types, options=options, target_opset=15)
+        onx = convert_sklearn(
+            model,
+            initial_types=initial_types,
+            options=options,
+            target_opset=15,
+        )
 
     output_path.write_bytes(onx.SerializeToString())
 
@@ -466,9 +616,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--prob-quantile", type=float, default=0.80)
     p.add_argument("--margin-quantile", type=float, default=0.65)
     p.add_argument("--walk-forward-splits", type=int, default=5)
-    p.add_argument("--mlp-weight", type=float, default=0.25)
-    p.add_argument("--lgbm-weight", type=float, default=0.25)
-    p.add_argument("--hgb-weight", type=float, default=0.50)
+    # Ensemble weight arguments.  Five models are available: MLP, LightGBM,
+    # HistGradientBoosting, ExtraTrees and Ridge.  Default weights are evenly
+    # split between the five models.  At least one weight must be non‑zero.
+    p.add_argument("--mlp-weight", type=float, default=0.20)
+    p.add_argument("--lgbm-weight", type=float, default=0.20)
+    p.add_argument("--hgb-weight", type=float, default=0.20)
+    p.add_argument("--extratrees-weight", type=float, default=0.20)
+    p.add_argument("--ridge-weight", type=float, default=0.20)
     return p.parse_args()
 
 
@@ -477,7 +632,16 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    weights = normalize_weights(args.mlp_weight, args.lgbm_weight, args.hgb_weight)
+    # Normalize all five model weights.  ExtraTrees and Ridge weights are
+    # included alongside MLP, LightGBM and HGB.  The returned dictionary
+    # contains keys for each model with values summing to one.
+    weights = normalize_weights(
+        args.mlp_weight,
+        args.lgbm_weight,
+        args.hgb_weight,
+        args.extratrees_weight,
+        args.ridge_weight,
+    )
 
     raw = load_rates_from_csv(Path(args.csv)) if args.csv else fetch_rates_from_mt5(args.symbol, args.timeframe, args.bars)
     raw.to_csv(output_dir / "training_rates_snapshot.csv", index=False)
@@ -531,9 +695,14 @@ def main() -> None:
     train_pred.to_csv(output_dir / "train_predictions_snapshot.csv", index=False)
     test_pred.to_csv(output_dir / "test_predictions_snapshot.csv", index=False)
 
+    # Export all models to ONNX format.  Each model uses the same feature
+    # count and therefore the same input shape.  ZipMap is disabled so
+    # probabilities/scores are returned as a simple tensor.
     export_model_to_onnx(models["mlp"], output_dir / "mlp.onnx", len(FEATURE_COLS))
     export_model_to_onnx(models["lgbm"], output_dir / "lightgbm.onnx", len(FEATURE_COLS))
     export_model_to_onnx(models["hgb"], output_dir / "hgb.onnx", len(FEATURE_COLS))
+    export_model_to_onnx(models["extratrees"], output_dir / "extratrees.onnx", len(FEATURE_COLS))
+    export_model_to_onnx(models["ridge"], output_dir / "ridge.onnx", len(FEATURE_COLS))
 
     meta = {
         "symbol": args.symbol,
@@ -544,19 +713,21 @@ def main() -> None:
         "features": FEATURE_COLS,
         "train_ratio": args.train_ratio,
         "weights": weights,
+        # quantiles and thresholds controlling label assignment and entry/exit rules
         "label_quantile": args.label_quantile,
         "prob_quantile": args.prob_quantile,
         "margin_quantile": args.margin_quantile,
         "barrier_abs_fwd_ret_h": barrier,
         "entry_prob_threshold": entry_prob_threshold,
         "min_prob_gap": min_prob_gap,
+        # diagnostic results
         "walk_forward": walk_forward,
         "train_summary": train_summary,
         "test_summary": test_summary,
     }
     (output_dir / "ensemble_scale_invariant_metadata.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
-    run_txt = f"""MODEL: Scale-invariant MLP + LightGBM + HGB ensemble
+    run_txt = f"""MODEL: Scale-invariant MLP + LightGBM + HGB + ExtraTrees + Ridge ensemble
 SYMBOL: {args.symbol}
 TIMEFRAME: {args.timeframe}
 HORIZON BARS: {args.horizon_bars}
@@ -586,9 +757,11 @@ TEST UTC:
   end  : {test_df["time"].iloc[-1]}
 
 NORMALIZED WEIGHTS:
-  InpMlpWeight  = {weights['mlp']:.6f}
-  InpLgbmWeight = {weights['lgbm']:.6f}
-  InpHgbWeight  = {weights['hgb']:.6f}
+  InpMlpWeight       = {weights['mlp']:.6f}
+  InpLgbmWeight      = {weights['lgbm']:.6f}
+  InpHgbWeight       = {weights['hgb']:.6f}
+  InpExtraTreesWeight = {weights['extratrees']:.6f}
+  InpRidgeWeight      = {weights['ridge']:.6f}
 
 RECOMMENDED EA INPUTS:
   InpEntryProbThreshold = {entry_prob_threshold:.6f}
@@ -599,6 +772,8 @@ FILES:
   - mlp.onnx
   - lightgbm.onnx
   - hgb.onnx
+  - extratrees.onnx
+  - ridge.onnx
 
 IMPORTANT:
 - Python and MT5 must use exactly the same feature engineering.
@@ -612,6 +787,8 @@ IMPORTANT:
     print("  - mlp.onnx")
     print("  - lightgbm.onnx")
     print("  - hgb.onnx")
+    print("  - extratrees.onnx")
+    print("  - ridge.onnx")
     print("Read: run_in_mt5.txt")
 
 
