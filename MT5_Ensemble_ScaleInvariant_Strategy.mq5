@@ -1,12 +1,16 @@
 #property strict
 #property version "1.00"
-#property description "MT5 EA: scale-invariant ONNX ensemble (MLP + LightGBM + HGB)"
+#property description "MT5 EA: scale-invariant ONNX ensemble (MLP + LightGBM + HGB + ExtraTrees + Ridge)"
 
 #include <Trade/Trade.mqh>
 
 #resource "mlp.onnx" as uchar MlpModel[]
 #resource "lightgbm.onnx" as uchar LgbmModel[]
 #resource "hgb.onnx" as uchar HgbModel[]
+
+// Additional ensemble members
+#resource "extratrees.onnx" as uchar ExtraTreesModel[]
+#resource "ridge.onnx" as uchar RidgeModel[]
 
 input double InpLots = 0.10;
 input double InpEntryProbThreshold = 0.60;
@@ -19,9 +23,16 @@ input bool InpCloseOnOppositeSignal = false;
 input bool InpAllowLong = true;
 input bool InpAllowShort = true;
 
-input double InpMlpWeight = 0.25;
-input double InpLgbmWeight = 0.25;
-input double InpHgbWeight = 0.50;
+// Ensemble weights for each model.  Defaults are evenly split across all five
+// models (0.20 each) but may be tuned by the user.  Values are
+// normalised in OnInit() so their sum equals one.
+input double InpMlpWeight = 0.20;
+input double InpLgbmWeight = 0.20;
+input double InpHgbWeight = 0.20;
+
+// Weights for additional models.  Defaults are evenly split across five models.
+input double InpExtraTreesWeight = 0.20;
+input double InpRidgeWeight      = 0.20;
 
 input long InpMagic = 26042026;
 input bool InpLog = false;
@@ -34,16 +45,26 @@ const long EXT_LABEL_SHAPE[] = {1};
 const long EXT_PROBA_SHAPE[] = {1, CLASS_COUNT};
 
 CTrade trade;
+// Model handles for each ensemble member.  Each handle is assigned during
+// OnInit via OnnxCreateFromBuffer.  Additional models for Extra Trees
+// and Ridge classifiers extend the original trio of MLP/LGBM/HGB.
 long g_mlp_handle = INVALID_HANDLE;
 long g_lgbm_handle = INVALID_HANDLE;
 long g_hgb_handle = INVALID_HANDLE;
+long g_extratrees_handle = INVALID_HANDLE;
+long g_ridge_handle = INVALID_HANDLE;
 
 datetime g_last_bar_time = 0;
 int g_bars_in_trade = 0;
 
+// Normalised weights for each model in the ensemble.  These are
+// computed in NormalizeWeights() from the input parameters.  Weights
+// always sum to 1.0 across all five models.
 double g_w_mlp = 0.0;
 double g_w_lgbm = 0.0;
 double g_w_hgb = 0.0;
+double g_w_extratrees = 0.0;
+double g_w_ridge = 0.0;
 
 enum SignalDirection { SIGNAL_SELL = -1, SIGNAL_FLAT = 0, SIGNAL_BUY = 1 };
 
@@ -56,10 +77,15 @@ void LogDebug(string message) {
 }
 
 bool NormalizeWeights() {
+  // Coerce all weights to non‑negative values.  The ensemble now
+  // contains five models: MLP, LightGBM, HistGradientBoosting,
+  // ExtraTrees and Ridge.  At least one weight must be positive.
   double a = MathMax(0.0, InpMlpWeight);
   double b = MathMax(0.0, InpLgbmWeight);
   double c = MathMax(0.0, InpHgbWeight);
-  double s = a + b + c;
+  double d = MathMax(0.0, InpExtraTreesWeight);
+  double e = MathMax(0.0, InpRidgeWeight);
+  double s = a + b + c + d + e;
   if (s <= 0.0) {
     LogInfo("NormalizeWeights failed: sum of ensemble weights is <= 0.");
     return false;
@@ -67,6 +93,8 @@ bool NormalizeWeights() {
   g_w_mlp = a / s;
   g_w_lgbm = b / s;
   g_w_hgb = c / s;
+  g_w_extratrees = d / s;
+  g_w_ridge = e / s;
   return true;
 }
 
@@ -217,17 +245,26 @@ bool PredictEnsembleProbabilities(double &pSell, double &pFlat, double &pBuy,
     return false;
   }
 
-  double s1, f1, b1, s2, f2, b2, s3, f3, b3;
+  // Each model returns a triplet of probabilities (pSell, pFlat, pBuy).
+  // We accumulate weighted probabilities across all five ensemble members.
+  double s1, f1, b1; // MLP
+  double s2, f2, b2; // LightGBM
+  double s3, f3, b3; // HistGradientBoosting
+  double s4, f4, b4; // ExtraTrees
+  double s5, f5, b5; // Ridge
   if (!RunSingleModel(g_mlp_handle, x, s1, f1, b1)) return false;
   if (!RunSingleModel(g_lgbm_handle, x, s2, f2, b2)) return false;
   if (!RunSingleModel(g_hgb_handle, x, s3, f3, b3)) return false;
+  if (!RunSingleModel(g_extratrees_handle, x, s4, f4, b4)) return false;
+  if (!RunSingleModel(g_ridge_handle, x, s5, f5, b5)) return false;
 
-  pSell = g_w_mlp * s1 + g_w_lgbm * s2 + g_w_hgb * s3;
-  pFlat = g_w_mlp * f1 + g_w_lgbm * f2 + g_w_hgb * f3;
-  pBuy = g_w_mlp * b1 + g_w_lgbm * b2 + g_w_hgb * b3;
+  pSell = g_w_mlp * s1 + g_w_lgbm * s2 + g_w_hgb * s3 + g_w_extratrees * s4 + g_w_ridge * s5;
+  pFlat = g_w_mlp * f1 + g_w_lgbm * f2 + g_w_hgb * f3 + g_w_extratrees * f4 + g_w_ridge * f5;
+  pBuy = g_w_mlp * b1 + g_w_lgbm * b2 + g_w_hgb * b3 + g_w_extratrees * b4 + g_w_ridge * b5;
   LogDebug(
-      StringFormat("Ensemble probabilities: pSell=%.5f pFlat=%.5f pBuy=%.5f",
-                   pSell, pFlat, pBuy));
+      StringFormat(
+          "Ensemble probabilities: pSell=%.5f pFlat=%.5f pBuy=%.5f",
+          pSell, pFlat, pBuy));
   return true;
 }
 
@@ -401,11 +438,16 @@ int OnInit() {
   trade.SetExpertMagicNumber(InpMagic);
   LogInfo("OnInit started.");
   if (!NormalizeWeights()) return INIT_PARAMETERS_INCORRECT;
+  // Create each model handle from the embedded resource buffers.  All
+  // models share the same input and output shapes configured in InitSingleModel().
   if (!InitSingleModel(g_mlp_handle, MlpModel)) return INIT_FAILED;
   if (!InitSingleModel(g_lgbm_handle, LgbmModel)) return INIT_FAILED;
   if (!InitSingleModel(g_hgb_handle, HgbModel)) return INIT_FAILED;
-  LogInfo(StringFormat("OnInit complete. weights=(%.3f, %.3f, %.3f)", g_w_mlp,
-                       g_w_lgbm, g_w_hgb));
+  if (!InitSingleModel(g_extratrees_handle, ExtraTreesModel)) return INIT_FAILED;
+  if (!InitSingleModel(g_ridge_handle, RidgeModel)) return INIT_FAILED;
+  LogInfo(StringFormat(
+      "OnInit complete. weights=(mlp=%.3f, lgbm=%.3f, hgb=%.3f, extratrees=%.3f, ridge=%.3f)",
+      g_w_mlp, g_w_lgbm, g_w_hgb, g_w_extratrees, g_w_ridge));
   return INIT_SUCCEEDED;
 }
 
@@ -413,9 +455,13 @@ void OnDeinit(const int reason) {
   if (g_mlp_handle != INVALID_HANDLE) OnnxRelease(g_mlp_handle);
   if (g_lgbm_handle != INVALID_HANDLE) OnnxRelease(g_lgbm_handle);
   if (g_hgb_handle != INVALID_HANDLE) OnnxRelease(g_hgb_handle);
+  if (g_extratrees_handle != INVALID_HANDLE) OnnxRelease(g_extratrees_handle);
+  if (g_ridge_handle != INVALID_HANDLE) OnnxRelease(g_ridge_handle);
   g_mlp_handle = INVALID_HANDLE;
   g_lgbm_handle = INVALID_HANDLE;
   g_hgb_handle = INVALID_HANDLE;
+  g_extratrees_handle = INVALID_HANDLE;
+  g_ridge_handle = INVALID_HANDLE;
 }
 
 void OnTick() {
