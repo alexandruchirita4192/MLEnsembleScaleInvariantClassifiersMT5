@@ -1,6 +1,6 @@
 #property strict
-#property version "1.21"
-#property description "MT5 EA: professional scale-invariant ONNX ensemble (MLP + LightGBM + HGB)"
+#property version "1.22"
+#property description "MT5 EA: professional scale-invariant ONNX ensemble (MLP + LightGBM + HGB + ExtraTrees + Ridge)"
 #property description "Crypto-aware adaptive spread guard"
 
 #include <Trade/Trade.mqh>
@@ -8,6 +8,10 @@
 #resource "mlp.onnx" as uchar MlpModel[]
 #resource "lightgbm.onnx" as uchar LgbmModel[]
 #resource "hgb.onnx" as uchar HgbModel[]
+
+// Additional ensemble members
+#resource "extratrees.onnx" as uchar ExtraTreesModel[]
+#resource "ridge.onnx" as uchar RidgeModel[]
 
 input double InpBaseLots = 0.10;
 input bool InpUseConfidenceSizing = true;
@@ -24,9 +28,16 @@ input bool InpCloseOnOppositeSignal = false;
 input bool InpAllowLong = true;
 input bool InpAllowShort = true;
 
-input double InpMlpWeight = 0.25;
-input double InpLgbmWeight = 0.25;
-input double InpHgbWeight = 0.50;
+// Ensemble weights for each model.  Defaults are evenly split across all five
+// models (0.20 each).  The values are normalised at runtime so their sum
+// equals one.
+input double InpMlpWeight = 0.20;
+input double InpLgbmWeight = 0.20;
+input double InpHgbWeight = 0.20;
+
+// Weights for additional models
+input double InpExtraTreesWeight = 0.20;
+input double InpRidgeWeight      = 0.20;
 
 input bool InpUseHourFilter = false;
 input int InpHourStart = 0;
@@ -79,6 +90,8 @@ CTrade trade;
 long g_mlp_handle = INVALID_HANDLE;
 long g_lgbm_handle = INVALID_HANDLE;
 long g_hgb_handle = INVALID_HANDLE;
+long g_extratrees_handle = INVALID_HANDLE;
+long g_ridge_handle = INVALID_HANDLE;
 
 datetime g_last_bar_time = 0;
 int g_bars_in_trade = 0;
@@ -86,6 +99,8 @@ int g_bars_in_trade = 0;
 double g_w_mlp = 0.0;
 double g_w_lgbm = 0.0;
 double g_w_hgb = 0.0;
+double g_w_extratrees = 0.0;
+double g_w_ridge = 0.0;
 
 int g_cooldown_remaining = 0;
 int g_last_history_deals_total = 0;
@@ -163,21 +178,25 @@ double CalcATR(const MqlRates &rates[], int start_shift, int period) {
 }
 
 bool NormalizeWeights() {
+  // Compute non‑negative weights for all five ensemble models.  The
+  // individual inputs correspond to MLP, LightGBM, HistGradientBoosting,
+  // ExtraTrees and Ridge.  At least one weight must be positive.
   double a = MathMax(0.0, InpMlpWeight);
   double b = MathMax(0.0, InpLgbmWeight);
   double c = MathMax(0.0, InpHgbWeight);
-
-  double s = a + b + c;
+  double d = MathMax(0.0, InpExtraTreesWeight);
+  double e = MathMax(0.0, InpRidgeWeight);
+  double s = a + b + c + d + e;
   if (s <= 0.0) {
     LogInfo(
-        "NormalizeWeights failed: sum of ensemble weights is <= 0. Check "
-        "InpMlpWeight/InpLgbmWeight/InpHgbWeight.");
+        "NormalizeWeights failed: sum of ensemble weights is <= 0. Check the input weights.");
     return false;
   }
-
   g_w_mlp = a / s;
   g_w_lgbm = b / s;
   g_w_hgb = c / s;
+  g_w_extratrees = d / s;
+  g_w_ridge = e / s;
   return true;
 }
 
@@ -462,6 +481,8 @@ bool PredictEnsembleProbabilities(double &pSell, double &pFlat, double &pBuy,
   double s1, f1, b1;
   double s2, f2, b2;
   double s3, f3, b3;
+  double s4, f4, b4;
+  double s5, f5, b5;
 
   if (!RunSingleModel(g_mlp_handle, x, s1, f1, b1)) {
     LogInfo("PredictEnsembleProbabilities: MLP model inference failed.");
@@ -478,12 +499,24 @@ bool PredictEnsembleProbabilities(double &pSell, double &pFlat, double &pBuy,
     return false;
   }
 
-  pSell = g_w_mlp * s1 + g_w_lgbm * s2 + g_w_hgb * s3;
-  pFlat = g_w_mlp * f1 + g_w_lgbm * f2 + g_w_hgb * f3;
-  pBuy = g_w_mlp * b1 + g_w_lgbm * b2 + g_w_hgb * b3;
+  // ExtraTrees model inference
+  if (!RunSingleModel(g_extratrees_handle, x, s4, f4, b4)) {
+    LogInfo("PredictEnsembleProbabilities: ExtraTrees model inference failed.");
+    return false;
+  }
+  // Ridge model inference
+  if (!RunSingleModel(g_ridge_handle, x, s5, f5, b5)) {
+    LogInfo("PredictEnsembleProbabilities: Ridge model inference failed.");
+    return false;
+  }
+
+  pSell = g_w_mlp * s1 + g_w_lgbm * s2 + g_w_hgb * s3 + g_w_extratrees * s4 + g_w_ridge * s5;
+  pFlat = g_w_mlp * f1 + g_w_lgbm * f2 + g_w_hgb * f3 + g_w_extratrees * f4 + g_w_ridge * f5;
+  pBuy = g_w_mlp * b1 + g_w_lgbm * b2 + g_w_hgb * b3 + g_w_extratrees * b4 + g_w_ridge * b5;
   LogDebug(
-      StringFormat("Ensemble probabilities: pSell=%.5f pFlat=%.5f pBuy=%.5f",
-                   pSell, pFlat, pBuy));
+      StringFormat(
+          "Ensemble probabilities: pSell=%.5f pFlat=%.5f pBuy=%.5f",
+          pSell, pFlat, pBuy));
 
   return true;
 }
@@ -847,6 +880,10 @@ int OnInit() {
 
   if (!InitSingleModel(g_hgb_handle, HgbModel)) return INIT_FAILED;
 
+  if (!InitSingleModel(g_extratrees_handle, ExtraTreesModel)) return INIT_FAILED;
+
+  if (!InitSingleModel(g_ridge_handle, RidgeModel)) return INIT_FAILED;
+
   ResetDailyLossStateIfNeeded();
 
   if (HistorySelect(0, TimeCurrent()))
@@ -855,8 +892,8 @@ int OnInit() {
     g_last_history_deals_total = 0;
 
   LogInfo(StringFormat(
-      "OnInit complete. weights=(%.3f, %.3f, %.3f) historyDeals=%d", g_w_mlp,
-      g_w_lgbm, g_w_hgb, g_last_history_deals_total));
+      "OnInit complete. weights=(mlp=%.3f, lgbm=%.3f, hgb=%.3f, extratrees=%.3f, ridge=%.3f) historyDeals=%d",
+      g_w_mlp, g_w_lgbm, g_w_hgb, g_w_extratrees, g_w_ridge, g_last_history_deals_total));
 
   return INIT_SUCCEEDED;
 }
@@ -865,10 +902,14 @@ void OnDeinit(const int reason) {
   if (g_mlp_handle != INVALID_HANDLE) OnnxRelease(g_mlp_handle);
   if (g_lgbm_handle != INVALID_HANDLE) OnnxRelease(g_lgbm_handle);
   if (g_hgb_handle != INVALID_HANDLE) OnnxRelease(g_hgb_handle);
+  if (g_extratrees_handle != INVALID_HANDLE) OnnxRelease(g_extratrees_handle);
+  if (g_ridge_handle != INVALID_HANDLE) OnnxRelease(g_ridge_handle);
 
   g_mlp_handle = INVALID_HANDLE;
   g_lgbm_handle = INVALID_HANDLE;
   g_hgb_handle = INVALID_HANDLE;
+  g_extratrees_handle = INVALID_HANDLE;
+  g_ridge_handle = INVALID_HANDLE;
 }
 
 void OnTick() {
