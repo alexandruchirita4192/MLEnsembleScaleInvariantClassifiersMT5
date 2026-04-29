@@ -14,7 +14,6 @@ from onnxmltools.convert.common.data_types import FloatTensorType as OnnxToolsFl
 from sklearn.ensemble import HistGradientBoostingClassifier, ExtraTreesClassifier
 from sklearn.linear_model import RidgeClassifier
 from sklearn.naive_bayes import GaussianNB
-from sklearn.naive_bayes import GaussianNB
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, confusion_matrix
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.neural_network import MLPClassifier
