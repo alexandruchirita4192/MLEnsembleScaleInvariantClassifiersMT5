@@ -14,6 +14,7 @@ The ensemble uses:
 - HistGradientBoosting – a histogram‑based gradient boosting classifier optimized for speed.
 - ExtraTrees – an ensemble of extremely randomized trees offering robust performance and diversity.
 - Ridge – a linear classifier with L2 regularization whose decision scores are converted to probabilities via softmax.
+- Naive Bayes – Gaussian Naive Bayes classifier with standardized inputs.
 
 Each model is exported to ONNX and loaded by the MT5 EA.
 
