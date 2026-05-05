@@ -154,13 +154,30 @@ def build_features(df: pd.DataFrame, horizon_bars: int) -> pd.DataFrame:
     return df
 
 
-def split_train_test(df: pd.DataFrame, train_ratio: float) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    split_idx = int(len(df) * train_ratio)
-    train_df = df.iloc[:split_idx].copy()
-    test_df = df.iloc[split_idx:].copy()
-    if len(train_df) < 1500 or len(test_df) < 250:
-        raise ValueError("Too few rows after split.")
-    return train_df, test_df
+def split_train_valid_test(
+    df: pd.DataFrame,
+    train_ratio: float
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    n = len(df)
+    train_end = int(n * train_ratio)
+
+    remaining = n - train_end
+    valid_size = remaining // 2
+    test_size = remaining - valid_size  # ensures all rows used
+
+    valid_end = train_end + valid_size
+
+    train_df = df.iloc[:train_end].copy()
+    valid_df = df.iloc[train_end:valid_end].copy()
+    test_df  = df.iloc[valid_end:].copy()
+    
+    if len(train_df) < 1500 or len(valid_df) < 200 or len(test_df) < 200:
+        raise ValueError(
+            f"Too few rows after split. "
+            f"train={len(train_df)}, valid={len(valid_df)}, test={len(test_df)}"
+        )
+    
+    return train_df, valid_df, test_df
 
 
 def compute_return_barrier(train_df: pd.DataFrame, label_quantile: float) -> float:
@@ -671,13 +688,14 @@ def main() -> None:
     feat_df.to_csv(output_dir / "training_features_snapshot.csv", index=False)
 
     print(f"Total feature rows: {len(feat_df)}")
-    train_df, test_df = split_train_test(feat_df, args.train_ratio)
-    print(f"Train: {len(train_df)} rows | Test: {len(test_df)} rows")
+    train_df, valid_df, test_df = split_train_valid_test(feat_df, args.train_ratio)
+    print(f"Train: {len(train_df)} | Valid: {len(valid_df)} | Test: {len(test_df)}")
     print(f"Train window: {train_df['time'].iloc[0]} -> {train_df['time'].iloc[-1]}")
-    print(f"Test window : {test_df['time'].iloc[0]} -> {test_df['time'].iloc[-1]}")
+    print(f"Valid window: {valid_df['time'].iloc[0]} -> {valid_df['time'].iloc[-1]}")
+    print(f"Test window: {test_df['time'].iloc[0]} -> {test_df['time'].iloc[-1]}")
     print(f"Normalized weights: {weights}")
 
-    print("\\nWalk-forward on train:")
+    print("\nWalk-forward on train:")
     walk_forward = walk_forward_report(
         train_df=train_df,
         weights=weights,
@@ -686,34 +704,40 @@ def main() -> None:
         margin_quantile=args.margin_quantile,
         n_splits=args.walk_forward_splits,
     )
-    print("\\nWalk-forward summary:")
+    print("\nWalk-forward summary:")
     print(json.dumps(walk_forward, indent=2))
 
     barrier = compute_return_barrier(train_df, args.label_quantile)
     train_lab = label_targets(train_df, barrier)
-    test_lab = label_targets(test_df, barrier)
+    valid_lab = label_targets(valid_df, barrier)
+    test_lab  = label_targets(test_df, barrier)
 
     models = fit_models(train_lab, random_state=42)
     entry_prob_threshold, min_prob_gap = derive_decision_thresholds(
-        models, train_lab, weights, args.prob_quantile, args.margin_quantile
+        models, valid_lab, weights, args.prob_quantile, args.margin_quantile
     )
-
+    
     train_pred = classify_with_thresholds(models, train_lab, weights, entry_prob_threshold, min_prob_gap)
-    test_pred = classify_with_thresholds(models, test_lab, weights, entry_prob_threshold, min_prob_gap)
+    valid_pred = classify_with_thresholds(models, valid_lab, weights, entry_prob_threshold, min_prob_gap)
+    test_pred  = classify_with_thresholds(models, test_lab, weights, entry_prob_threshold, min_prob_gap)
 
     train_summary = summarize_predictions(train_pred)
+    valid_summary = summarize_predictions(valid_pred)
     test_summary = summarize_predictions(test_pred)
 
-    print(f"\\nLabel barrier abs(fwd_ret_h): {barrier:.8f}")
+    print(f"\nLabel barrier abs(fwd_ret_h): {barrier:.8f}")
     print(f"Recommended InpEntryProbThreshold: {entry_prob_threshold:.6f}")
     print(f"Recommended InpMinProbGap:        {min_prob_gap:.6f}")
-
-    print("\\nTrain summary:")
+    
+    print("\nTrain summary:")
     print(json.dumps(train_summary, indent=2))
-    print("\\nTest summary:")
+    print("\nValid summary:")
+    print(json.dumps(valid_summary, indent=2))
+    print("\nTest summary:")
     print(json.dumps(test_summary, indent=2))
-
+    
     train_pred.to_csv(output_dir / "train_predictions_snapshot.csv", index=False)
+    valid_pred.to_csv(output_dir / "valid_predictions_snapshot.csv", index=False)
     test_pred.to_csv(output_dir / "test_predictions_snapshot.csv", index=False)
 
     # Export all models to ONNX.  Each model uses the same input feature shape.
@@ -741,6 +765,7 @@ def main() -> None:
         "min_prob_gap": min_prob_gap,
         "walk_forward": walk_forward,
         "train_summary": train_summary,
+        "valid_summary": valid_summary,
         "test_summary": test_summary,
     }
     (output_dir / "ensemble_scale_invariant_metadata.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
@@ -766,11 +791,15 @@ FEATURES:
 - range_pct_1
 - body_pct_1
 
-TRAIN UTC:
+TRAIN UTC (trained ONNX models period):
   start: {train_df["time"].iloc[0]}
   end  : {train_df["time"].iloc[-1]}
 
-TEST UTC:
+VALID UTC (derive weights period and set all parameters for best profit, smallest drawdown):
+  start: {valid_df["time"].iloc[0]}
+  end  : {valid_df["time"].iloc[-1]}
+
+TEST UTC (test if still profitable period, without any change to parameters):
   start: {test_df["time"].iloc[0]}
   end  : {test_df["time"].iloc[-1]}
 
