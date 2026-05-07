@@ -832,7 +832,7 @@ IMPORTANT:
 """
     (output_dir / "run_in_mt5.txt").write_text(run_txt, encoding="utf-8")
 
-    print(f"\\nONNX models saved to: {output_dir}")
+    print(f"\nONNX models saved to: {output_dir}")
     print("  - mlp.onnx")
     print("  - lightgbm.onnx")
     print("  - hgb.onnx")
