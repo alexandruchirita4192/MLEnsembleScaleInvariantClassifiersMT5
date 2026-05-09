@@ -56,7 +56,7 @@ These are all relative or standardized features, which makes the model more robu
 ```text
 wine python -m venv .venv
 source .venv/bin/activate
-wine pip install MetaTrader5 pandas numpy scikit-learn lightgbm skl2onnx onnxmltools onnx
+wine pip install MetaTrader5 pandas numpy scikit-learn lightgbm skl2onnx onnxmltools onnx packaging
 ```
 
 ### Training of ONNX models (at once)
