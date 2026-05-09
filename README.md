@@ -51,6 +51,14 @@ The package uses 13 features:
 
 These are all relative or standardized features, which makes the model more robust when price levels move into ranges never seen before.
 
+### Python Prerequisites
+
+```text
+python -m venv .venv
+source .venv/bin/activate
+pip install MetaTrader5 pandas numpy scikit-learn lightgbm skl2onnx onnxmltools onnx
+```
+
 ### Training of ONNX models (at once)
 
 ```text
