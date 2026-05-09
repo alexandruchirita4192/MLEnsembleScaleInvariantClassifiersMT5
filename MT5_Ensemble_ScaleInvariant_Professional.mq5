@@ -4,7 +4,7 @@
 #property strict
 #property version "1.24"
 #property description "MT5 EA: professional scale-invariant ONNX ensemble (MLP + LightGBM + HGB + ExtraTrees + Ridge + NaiveBayes)"
-#property description "Crypto-aware adaptive spread guard, support/resistance skipping, "
+#property description "Crypto-aware adaptive spread guard, support/resistance skipping, trend confirmation"
 
 #include <Trade/Trade.mqh>
 
