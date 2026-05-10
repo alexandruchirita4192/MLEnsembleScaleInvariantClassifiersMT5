@@ -2,7 +2,7 @@
 //| Ensemble Scale-Invariant Professional             Copyright 2026 |
 //+------------------------------------------------------------------+
 #property strict
-#property version "1.24"
+#property version "1.25"
 #property description "MT5 EA: professional scale-invariant ONNX ensemble (MLP + LightGBM + HGB + ExtraTrees + Ridge + NaiveBayes)"
 #property description "Crypto-aware adaptive spread guard, support/resistance skipping, trend confirmation"
 
@@ -59,12 +59,20 @@ input bool InpUseCooldownAfterClose = true;
 input int InpCooldownBars = 2;
 
 input bool InpUseDailyLossGuard = true;
-input double InpDailyLossLimitMoney = 300.0;
+input double InpDailyLossLimitMoney = 25.0;
 input bool InpDailyLossFlatOnTrigger = true;
 
 input bool InpUseTrend = true;
 input bool InpUseSupportAndResistance = true;
 input double InpSupportAndResistanceBuffer = 0.002; // InpSupportAndResistanceBuffer=0.2%
+input bool InpUseBreakout = true;
+input bool InpUseStrongBreakout = true;
+
+input bool InpUseVolumeFilter = false;
+input double InpMinVolume = 0.001;
+input bool InpFilterMinVolume = false;
+input double InpMaxVolume = 0.95;
+input bool InpFilterMaxVolume = false;
 
 input long InpMagic = 26042026;
 input bool InpLog = false;
@@ -1098,21 +1106,65 @@ SignalDirection GetTrend()
   }
 
 //+------------------------------------------------------------------+
-//| GetResistance                                                    |
+//| GetResistance - shifted to exclude last bar (could be breakout)  |
 //+------------------------------------------------------------------+
 double GetResistance(int period=50)
   {
-   int index = iHighest(_Symbol, PERIOD_M15, MODE_HIGH, period, 0);
+   int index = iHighest(_Symbol, PERIOD_M15, MODE_HIGH, period, 1);
    return iHigh(_Symbol, PERIOD_M15, index);
   }
 
 //+------------------------------------------------------------------+
-//| GetSupport                                                       |
+//| GetSupport - shifted to exclude last bar (could be breakout)     |
 //+------------------------------------------------------------------+
 double GetSupport(int period=50)
   {
-   int index = iLowest(_Symbol, PERIOD_M15, MODE_LOW, period, 0);
+   int index = iLowest(_Symbol, PERIOD_M15, MODE_LOW, period, 1);
    return iLow(_Symbol, PERIOD_M15, index);
+  }
+
+//+------------------------------------------------------------------+
+//| GetATR                                                           |
+//+------------------------------------------------------------------+
+double GetATR()
+  {
+   return iATR(_Symbol, PERIOD_M15, 14);
+  }
+
+//+------------------------------------------------------------------+
+//| IsBreakoutBuy                                                    |
+//+------------------------------------------------------------------+
+bool IsBreakoutBuy(double resistance)
+  {
+   double close0 = iClose(_Symbol, PERIOD_M15, 0);
+   return close0 > resistance;
+  }
+
+//+------------------------------------------------------------------+
+//| IsBreakoutSell                                                   |
+//+------------------------------------------------------------------+
+bool IsBreakoutSell(double support)
+  {
+   double close0 = iClose(_Symbol, PERIOD_M15, 0);
+   return close0 < support;
+  }
+
+//+------------------------------------------------------------------+
+//| IsStrongBreakoutBuy                                              |
+//+------------------------------------------------------------------+
+bool IsStrongBreakoutBuy(double atr, double resistance)
+  {
+   double close0 = iClose(_Symbol, PERIOD_M15, 0);
+   return close0 > resistance + 0.5 * atr;
+  }
+
+//+------------------------------------------------------------------+
+//| IsStrongBreakoutSell                                             |
+//+------------------------------------------------------------------+
+bool IsStrongBreakoutSell(double atr, double support)
+  {
+   double close0 = iClose(_Symbol, PERIOD_M15, 0);
+   return close0 < support - 0.5 * atr;
   }
 
 //+------------------------------------------------------------------+
@@ -1298,24 +1350,48 @@ void OnTick()
         }
      }
 
+   double atr = GetATR();
+
    if(InpUseSupportAndResistance)
      {
       double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
       double resistance = GetResistance(50);
       double support = GetSupport(50);
+      bool isBuyBreakout = InpUseBreakout && IsBreakoutBuy(resistance);
+      bool isSellBreakout = InpUseBreakout && IsBreakoutSell(support);
+      bool isBuyStrongBreakout = InpUseStrongBreakout && IsStrongBreakoutBuy(atr, resistance);
+      bool isSellStrongBreakout = InpUseStrongBreakout && IsStrongBreakoutSell(atr, support);
 
-      // block BUY near resistance
-      if(info.signal == SIGNAL_BUY && price > resistance * (1 - InpSupportAndResistanceBuffer))
+      // block BUY near resistance (except BUY breakout & strong BUY breakout)
+      if(info.signal == SIGNAL_BUY && price > resistance * (1 - InpSupportAndResistanceBuffer) && !isBuyBreakout && !isBuyStrongBreakout)
         {
          LogDebug("OnTick: skipping entry, skipping buy near resistance.");
          return;
         }
 
-      // block SELL near support
-      if(info.signal == SIGNAL_SELL && price < support * (1 + InpSupportAndResistanceBuffer))
+      // block SELL near support (except SELL breakout & strong SELL breakout)
+      if(info.signal == SIGNAL_SELL && price < support * (1 + InpSupportAndResistanceBuffer) && !isSellBreakout && !isSellStrongBreakout)
         {
          LogDebug("OnTick: skipping entry, skipping sell near support.");
+         return;
+        }
+     }
+
+   if(InpUseVolumeFilter)
+     {
+      double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      double volumeRatio = atr/price;
+
+      if(InpFilterMinVolume && volumeRatio < InpMinVolume)
+        {
+         LogDebug("OnTick: skipping entry, market too quiet (volume too low).");
+         return;
+        }
+
+      if(InpFilterMaxVolume && volumeRatio > InpMaxVolume)
+        {
+         LogDebug("OnTick: skipping entry, market too loud (volume too high).");
          return;
         }
      }
