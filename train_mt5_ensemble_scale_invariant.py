@@ -21,6 +21,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from skl2onnx import convert_sklearn
 from skl2onnx.common.data_types import FloatTensorType as SklFloatTensorType
+from sklearn.inspection import permutation_importance
 
 try:
     import MetaTrader5 as mt5
@@ -353,6 +354,102 @@ def fit_models(train_df: pd.DataFrame, random_state: int = 42):
         "naivebayes": naivebayes,
     }
 
+
+def compute_feature_importance(models, train_df: pd.DataFrame, output_dir: Path):
+    X = train_df[FEATURE_COLS].to_numpy(dtype=np.float32)
+    y = train_df["target_class_enc"].to_numpy(dtype=np.int64)
+
+    importance_results = {}
+
+    print("\n=== FEATURE IMPORTANCE (TREE MODELS) ===")
+
+    for name, model in models.items():
+        try:
+            # direct tree models
+            if hasattr(model, "feature_importances_"):
+                importances = model.feature_importances_
+
+            # pipeline (ex: scaler + model)
+            elif hasattr(model, "named_steps"):
+                found = False
+                for step in model.named_steps.values():
+                    if hasattr(step, "feature_importances_"):
+                        importances = step.feature_importances_
+                        found = True
+                        break
+                if not found:
+                    continue
+            else:
+                continue
+
+            importance_results[name] = dict(zip(FEATURE_COLS, importances))
+
+            print(f"\n{name}:")
+            for f, v in sorted(zip(FEATURE_COLS, importances), key=lambda x: x[1], reverse=True):
+                print(f"{f:20s} {v:.6f}")
+
+        except Exception as e:
+            print(f"{name}: importance failed -> {e}")
+
+    # save
+    (output_dir / "feature_importance.json").write_text(
+        json.dumps(importance_results, indent=2),
+        encoding="utf-8"
+    )
+
+
+def compute_permutation_importance(models, train_df: pd.DataFrame, weights: Dict[str, float], output_dir: Path):
+    X = train_df[FEATURE_COLS].to_numpy(dtype=np.float32)
+    y = train_df["target_class"].to_numpy(dtype=np.int64)
+
+    print("\n=== PERMUTATION IMPORTANCE (ENSEMBLE) ===")
+
+    def ensemble_predict(X_input):
+        proba = weighted_probabilities(models, X_input, weights)
+        return np.argmax(proba, axis=1)
+
+    r = permutation_importance(
+        estimator=None,
+        X=X,
+        y=y,
+        scoring="balanced_accuracy",
+        n_repeats=5,
+        random_state=42,
+        n_jobs=-1,
+    )
+
+    # IMPORTANT: workaround (sklearn expects estimator)
+    # deci calcul manual:
+
+    base_pred = ensemble_predict(X)
+    base_score = balanced_accuracy_score(y, base_pred)
+
+    importances = []
+
+    for i in range(X.shape[1]):
+        scores = []
+
+        for _ in range(5):
+            X_permuted = X.copy()
+            np.random.shuffle(X_permuted[:, i])
+
+            pred = ensemble_predict(X_permuted)
+            score = balanced_accuracy_score(y, pred)
+            scores.append(base_score - score)
+
+        importances.append(np.mean(scores))
+
+    result = list(zip(FEATURE_COLS, importances))
+    result.sort(key=lambda x: x[1], reverse=True)
+
+    for f, v in result:
+        print(f"{f:20s} {v:.6f}")
+
+    (output_dir / "permutation_importance.json").write_text(
+        json.dumps({f: float(v) for f, v in result}, indent=2),
+        encoding="utf-8"
+    )
+    
 
 def normalize_weights(
     mlp_weight: float,
@@ -713,6 +810,10 @@ def main() -> None:
     test_lab  = label_targets(test_df, barrier)
 
     models = fit_models(train_lab, random_state=42)
+    
+    compute_feature_importance(models, train_lab, output_dir)
+    compute_permutation_importance(models, train_lab, weights, output_dir)
+    
     entry_prob_threshold, min_prob_gap = derive_decision_thresholds(
         models, valid_lab, weights, args.prob_quantile, args.margin_quantile
     )
