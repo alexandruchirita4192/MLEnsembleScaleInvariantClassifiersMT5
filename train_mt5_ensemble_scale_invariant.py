@@ -912,6 +912,10 @@ FEATURES:
 - atr_pct_14
 - range_pct_1
 - body_pct_1
+- rsi_14
+- sma_ratio_50_200
+- dist_sma_50
+- dist_sma_200
 
 TRAIN UTC (trained ONNX models period):
   start: {train_df["time"].iloc[0]}
