@@ -888,11 +888,6 @@ def main() -> None:
     feat_df = pd.concat(all_feature_dfs, ignore_index=True)
     
     print(f"\nTOTAL MULTI-SYMBOL DATASET SIZE: {len(feat_df)}")
-    
-    raw.to_csv(output_dir / "training_rates_snapshot.csv", index=False)
-
-    feat_df = build_features(raw, args.horizon_bars)
-    feat_df.to_csv(output_dir / "training_features_snapshot.csv", index=False)
 
     print(f"Total feature rows: {len(feat_df)}")
     train_df, valid_df, test_df = split_train_valid_test(feat_df, args.train_ratio)
