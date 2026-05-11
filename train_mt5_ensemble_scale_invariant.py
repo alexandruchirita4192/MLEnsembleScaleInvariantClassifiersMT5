@@ -838,8 +838,6 @@ def main() -> None:
         args.naivebayes_weight,
     )
 
-    raw = load_rates_from_csv(Path(args.csv))
-    
     # ==========================================
     # BUILD SYMBOL LIST
     # ==========================================
