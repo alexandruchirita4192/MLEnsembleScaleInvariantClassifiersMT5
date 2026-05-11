@@ -183,25 +183,63 @@ def split_train_valid_test(
     df: pd.DataFrame,
     train_ratio: float
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    n = len(df)
-    train_end = int(n * train_ratio)
 
-    remaining = n - train_end
-    valid_size = remaining // 2
-    test_size = remaining - valid_size  # ensures all rows used
+    train_parts = []
+    valid_parts = []
+    test_parts = []
 
-    valid_end = train_end + valid_size
+    symbols = sorted(df["symbol_name"].unique())
 
-    train_df = df.iloc[:train_end].copy()
-    valid_df = df.iloc[train_end:valid_end].copy()
-    test_df  = df.iloc[valid_end:].copy()
-    
-    if len(train_df) < 1500 or len(valid_df) < 200 or len(test_df) < 200:
-        raise ValueError(
-            f"Too few rows after split. "
-            f"train={len(train_df)}, valid={len(valid_df)}, test={len(test_df)}"
+    for symbol in symbols:
+
+        df_symbol = (
+            df[df["symbol_name"] == symbol]
+            .sort_values("time")
+            .reset_index(drop=True)
         )
-    
+
+        n = len(df_symbol)
+
+        train_end = int(n * train_ratio)
+
+        remaining = n - train_end
+
+        valid_size = remaining // 2
+        test_size = remaining - valid_size
+
+        valid_end = train_end + valid_size
+
+        train_df_symbol = df_symbol.iloc[:train_end].copy()
+        valid_df_symbol = df_symbol.iloc[train_end:valid_end].copy()
+        test_df_symbol = df_symbol.iloc[valid_end:].copy()
+
+        if (
+            len(train_df_symbol) < 1500
+            or len(valid_df_symbol) < 200
+            or len(test_df_symbol) < 200
+        ):
+            raise ValueError(
+                f"Too few rows for symbol={symbol}. "
+                f"train={len(train_df_symbol)}, "
+                f"valid={len(valid_df_symbol)}, "
+                f"test={len(test_df_symbol)}"
+            )
+
+        print(
+            f"{symbol}: "
+            f"train={len(train_df_symbol)} "
+            f"valid={len(valid_df_symbol)} "
+            f"test={len(test_df_symbol)}"
+        )
+
+        train_parts.append(train_df_symbol)
+        valid_parts.append(valid_df_symbol)
+        test_parts.append(test_df_symbol)
+
+    train_df = pd.concat(train_parts, ignore_index=True)
+    valid_df = pd.concat(valid_parts, ignore_index=True)
+    test_df = pd.concat(test_parts, ignore_index=True)
+
     return train_df, valid_df, test_df
 
 
@@ -761,6 +799,7 @@ def parse_args() -> argparse.Namespace:
         description="Train a scale-invariant ensemble (MLP + LightGBM + HGB + ExtraTrees + Ridge + NaiveBayes) for MT5."
     )
     p.add_argument("--symbol", default="XAGUSD")
+    p.add_argument("--multi-symbol-csv", type=str, default="", help="Comma separated symbols for multi-symbol training. Example: XAGUSD,XAUUSD,EURUSD")
     p.add_argument("--timeframe", default="M15")
     p.add_argument("--bars", type=int, default=20000)
     p.add_argument("--csv", type=str, default="")
@@ -799,7 +838,59 @@ def main() -> None:
         args.naivebayes_weight,
     )
 
-    raw = load_rates_from_csv(Path(args.csv)) if args.csv else fetch_rates_from_mt5(args.symbol, args.timeframe, args.bars)
+    raw = load_rates_from_csv(Path(args.csv))
+    
+    # ==========================================
+    # BUILD SYMBOL LIST
+    # ==========================================
+    
+    if args.multi_symbol_csv.strip():
+        symbols = [
+            s.strip().upper()
+            for s in args.multi_symbol_csv.split(",")
+            if s.strip()
+        ]
+    else:
+        symbols = [args.symbol]
+    
+    print("Symbols used:")
+    for s in symbols:
+        print(" ", s)
+    
+    # ==========================================
+    # LOAD + BUILD FEATURES FOR EACH SYMBOL
+    # ==========================================
+    
+    all_feature_dfs = []
+    
+    for symbol in symbols:
+    
+        print(f"\n=== PROCESSING SYMBOL: {symbol} ===")
+    
+        if args.csv:
+            raw_symbol = load_rates_from_csv(Path(args.csv))
+        else:
+            raw_symbol = fetch_rates_from_mt5(
+                symbol=symbol,
+                timeframe_name=args.timeframe,
+                bars=args.bars
+            )
+    
+        feat_symbol = build_features(raw_symbol, args.horizon_bars)
+    
+        # useful for debugging / analysis
+        feat_symbol["symbol_name"] = symbol
+    
+        all_feature_dfs.append(feat_symbol)
+    
+    # ==========================================
+    # CONCAT ALL SYMBOLS
+    # ==========================================
+    
+    feat_df = pd.concat(all_feature_dfs, ignore_index=True)
+    
+    print(f"\nTOTAL MULTI-SYMBOL DATASET SIZE: {len(feat_df)}")
+    
     raw.to_csv(output_dir / "training_rates_snapshot.csv", index=False)
 
     feat_df = build_features(raw, args.horizon_bars)
