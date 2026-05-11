@@ -2,7 +2,7 @@
 //| Ensemble Scale-Invariant Professional             Copyright 2026 |
 //+------------------------------------------------------------------+
 #property strict
-#property version "1.25"
+#property version "1.4"
 #property description "MT5 EA: professional scale-invariant ONNX ensemble (MLP + LightGBM + HGB + ExtraTrees + Ridge + NaiveBayes)"
 #property description "Crypto-aware adaptive spread guard, support/resistance skipping, trend confirmation"
 
@@ -78,7 +78,7 @@ input long InpMagic = 26042026;
 input bool InpLog = false;
 input bool InpDebugLog = false;
 
-const int FEATURE_COUNT = 13;
+const int FEATURE_COUNT = 17;
 const int CLASS_COUNT = 3;
 const long EXT_INPUT_SHAPE[] = {1, FEATURE_COUNT};
 const long EXT_LABEL_SHAPE[] = {1};
@@ -553,6 +553,42 @@ bool BuildFeatureVector(matrixf &features, double &atr14_raw)
    double range_pct_1 = (h - l) / (c + eps);
    double body_pct_1 = (c - o) / (o + eps);
 
+// === RSI 14 ===
+   double gain=0, loss=0;
+   for(int i=1;i<=14;i++)
+     {
+      double diff = iClose(_Symbol, PERIOD_M15, i-1) - iClose(_Symbol, PERIOD_M15, i);
+      if(diff > 0)
+         gain += diff;
+      else
+         loss -= diff;
+     }
+
+   double rs = gain / (loss + 1e-8);
+   double rsi_14 = 100.0 - (100.0 / (1.0 + rs));
+
+
+// === SMA 50 / 200 ===
+   double sma50=0, sma200=0;
+
+   for(int i=0;i<50;i++)
+      sma50 += iClose(_Symbol, PERIOD_M15, i);
+
+   for(int i=0;i<200;i++)
+      sma200 += iClose(_Symbol, PERIOD_M15, i);
+
+   sma50 /= 50;
+   sma200 /= 200;
+
+// sma_ratio_50_200
+   double sma_ratio_50_200 = sma50 / sma200 - 1.0;
+
+// dist_sma_50
+   double dist_sma_50 = iClose(_Symbol, PERIOD_M15, 0) / sma50 - 1.0;
+
+// dist_sma_200
+   double dist_sma_200 = iClose(_Symbol, PERIOD_M15, 0) / sma200 - 1.0;
+
    features.Resize(1, FEATURE_COUNT);
    features[0][0] = (float)ret_1;
    features[0][1] = (float)ret_3;
@@ -567,7 +603,11 @@ bool BuildFeatureVector(matrixf &features, double &atr14_raw)
    features[0][10] = (float)atr_pct_14;
    features[0][11] = (float)range_pct_1;
    features[0][12] = (float)body_pct_1;
-
+   features[0][13] = (float)rsi_14;
+   features[0][14] = (float)sma_ratio_50_200;
+   features[0][15] = (float)dist_sma_50;
+   features[0][16] = (float)dist_sma_200;
+   
    return true;
   }
 
