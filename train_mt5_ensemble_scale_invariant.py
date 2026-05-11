@@ -383,7 +383,7 @@ def compute_feature_importance(models, train_df: pd.DataFrame, output_dir: Path)
                 continue
 
             importance_results[name] = {
-                f: float(v) for f, v in zip(FEATURE_COLS, importances)
+                f: float(v) for f, v in sorted(zip(FEATURE_COLS, importances), key=lambda x: x[1], reverse=True)
             }
 
             print(f"\n{name}:")
@@ -400,9 +400,9 @@ def compute_feature_importance(models, train_df: pd.DataFrame, output_dir: Path)
     )
 
 
-def compute_permutation_importance(models, train_df: pd.DataFrame, weights: Dict[str, float], output_dir: Path):
+def compute_permutation_importance(models, train_df, weights, output_dir):
     X = train_df[FEATURE_COLS].to_numpy(dtype=np.float32)
-    y = train_df["target_class"].to_numpy(dtype=np.int64)
+    y = train_df["target_class_enc"].to_numpy(dtype=np.int64)
 
     print("\n=== PERMUTATION IMPORTANCE (ENSEMBLE) ===")
 
@@ -410,48 +410,43 @@ def compute_permutation_importance(models, train_df: pd.DataFrame, weights: Dict
         proba = weighted_probabilities(models, X_input, weights)
         return np.argmax(proba, axis=1)
 
-    r = permutation_importance(
-        estimator=None,
-        X=X,
-        y=y,
-        scoring="balanced_accuracy",
-        n_repeats=5,
-        random_state=42,
-        n_jobs=-1,
-    )
-
-    # IMPORTANT: workaround (sklearn expects estimator)
-    # deci calcul manual:
-
+    # baseline
     base_pred = ensemble_predict(X)
     base_score = balanced_accuracy_score(y, base_pred)
 
     importances = []
 
-    for i in range(X.shape[1]):
+    for i, feature_name in enumerate(FEATURE_COLS):
         scores = []
 
-        for _ in range(5):
-            X_permuted = X.copy()
-            np.random.shuffle(X_permuted[:, i])
+        for _ in range(5):  # repeats
+            X_perm = X.copy()
 
-            pred = ensemble_predict(X_permuted)
+            # shuffle ONLY column i
+            idx = np.random.permutation(len(X_perm))
+            X_perm[:, i] = X_perm[idx, i]
+
+            pred = ensemble_predict(X_perm)
             score = balanced_accuracy_score(y, pred)
+
             scores.append(base_score - score)
 
-        importances.append(np.mean(scores))
+        mean_importance = float(np.mean(scores))
+        importances.append((feature_name, mean_importance))
 
-    result = list(zip(FEATURE_COLS, importances))
-    result.sort(key=lambda x: x[1], reverse=True)
+    # sort desc
+    importances.sort(key=lambda x: x[1], reverse=True)
 
-    for f, v in result:
+    # print
+    for f, v in importances:
         print(f"{f:20s} {v:.6f}")
 
+    # save JSON
     (output_dir / "permutation_importance.json").write_text(
-        json.dumps({f: float(v) for f, v in result}, indent=2),
+        json.dumps({f: float(v) for f, v in importances}, indent=2),
         encoding="utf-8"
     )
-    
+
 
 def normalize_weights(
     mlp_weight: float,
