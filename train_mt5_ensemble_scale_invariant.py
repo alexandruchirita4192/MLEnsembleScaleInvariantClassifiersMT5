@@ -144,7 +144,27 @@ def build_features(df: pd.DataFrame, horizon_bars: int) -> pd.DataFrame:
     df["tr"] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     df["atr_14"] = df["tr"].rolling(14).mean()
     df["atr_pct_14"] = df["atr_14"] / (df["close"] + eps)
-
+    
+    # ================= RSI =================
+    delta = df["close"].diff()
+    
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    
+    avg_gain = gain.rolling(14).mean()
+    avg_loss = loss.rolling(14).mean()
+    
+    rs = avg_gain / avg_loss
+    df["rsi_14"] = 100 - (100 / (1 + rs))
+    
+    
+    # ================= SMA 50 / 200 =================
+    df["sma_50"] = df["close"].rolling(50).mean()
+    df["sma_200"] = df["close"].rolling(200).mean()
+    df["dist_sma_50"] = df["close"] / df["sma_50"] - 1
+    df["dist_sma_200"] = df["close"] / df["sma_200"] - 1
+    df["sma_ratio_50_200"] = df["sma_50"] / df["sma_200"] - 1
+    
     df["range_pct_1"] = (df["high"] - df["low"]) / (df["close"] + eps)
     df["body_pct_1"] = (df["close"] - df["open"]) / (df["open"] + eps)
 
