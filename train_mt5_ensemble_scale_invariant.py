@@ -844,7 +844,7 @@ def main() -> None:
     
     if args.multi_symbol_csv.strip():
         symbols = [
-            s.strip().upper()
+            s.strip()
             for s in args.multi_symbol_csv.split(",")
             if s.strip()
         ]
