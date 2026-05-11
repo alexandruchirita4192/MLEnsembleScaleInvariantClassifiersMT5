@@ -382,11 +382,13 @@ def compute_feature_importance(models, train_df: pd.DataFrame, output_dir: Path)
             else:
                 continue
 
-            importance_results[name] = dict(zip(FEATURE_COLS, importances))
+            importance_results[name] = {
+                f: float(v) for f, v in zip(FEATURE_COLS, importances)
+            }
 
             print(f"\n{name}:")
             for f, v in sorted(zip(FEATURE_COLS, importances), key=lambda x: x[1], reverse=True):
-                print(f"{f:20s} {v:.6f}")
+                print(f"{f:20s} {float(v):.6f}")
 
         except Exception as e:
             print(f"{name}: importance failed -> {e}")
