@@ -87,3 +87,14 @@ pip install MetaTrader5 pandas numpy scikit-learn lightgbm skl2onnx onnxmltools 
 ```text
 train_mt5_ensemble_scale_invariant.py --symbol XAGUSD --timeframe M15 --bars 80000 --horizon-bars 8 --train-ratio 0.82 --output-dir output_ensemble_XAGUSD_M15_h8_82_scale_invariant
 ```
+
+## Multi-symbol training
+
+The package supports training on multiple symbols simultaneously.
+
+Example:
+```text
+python train_mt5_ensemble_scale_invariant.py --multi-symbol-csv XAGUSD,XAUUSD,EURUSD --timeframe M15 --bars 80000
+```
+
+The dataset is built separately for each symbol and then concatenated.
