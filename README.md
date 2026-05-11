@@ -20,7 +20,7 @@ Each model is exported to ONNX and loaded by the MT5 EA.
 
 ## Features used by both Python and MT5
 
-The package uses 13 features:
+The package uses 17 features:
 
 1. ret_1
 2. ret_3
@@ -35,6 +35,10 @@ The package uses 13 features:
 11. atr_pct_14
 12. range_pct_1
 13. body_pct_1
+14. rsi_14
+15. sma_ratio_50_200
+16. dist_sma_50
+17. dist_sma_200
 
 ### Feature definitions
 
@@ -49,7 +53,26 @@ The package uses 13 features:
 - range_pct_1 = (high - low) / close
 - body_pct_1 = (close - open) / open
 
-These are all relative or standardized features, which makes the model more robust when price levels move into ranges never seen before.
+### Additional directional features
+
+- rsi_14 = Relative Strength Index over 14 bars
+- sma_50 = moving average over 50 bars
+- sma_200 = moving average over 200 bars
+- sma_ratio_50_200 = sma_50 / sma_200 - 1
+- dist_sma_50 = close / sma_50 - 1
+- dist_sma_200 = close / sma_200 - 1
+
+### Notes on feature design
+
+- Short-term features (returns, volatility) capture local price dynamics
+- Long-term features (SMA50/200) capture macro trend direction
+- RSI captures overbought / oversold conditions
+- The combination allows the model to mix:
+  - volatility triggers
+  - short-term momentum
+  - long-term trend context
+
+All features are relative or standardized, which makes the model more robust when price levels move into ranges never seen before.
 
 ### Python Prerequisites
 
