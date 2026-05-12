@@ -804,7 +804,6 @@ def walk_forward_report(train_df: pd.DataFrame, weights: Dict[str, float], label
         fit_df = train_df.iloc[fit_idx].copy()
         valid_df = train_df.iloc[valid_idx].copy()
 
-        barrier = compute_return_barrier(fit_df, label_quantile)
         fit_df = add_triple_barrier_target(
             fit_df,
             horizon_bars=args.horizon_bars,
