@@ -120,6 +120,90 @@ def load_rates_from_csv(csv_path: Path) -> pd.DataFrame:
     return df[["time", "open", "high", "low", "close", "volume"]]
 
 
+def add_triple_barrier_target(
+    df: pd.DataFrame,
+    horizon_bars: int,
+    tp_atr_mult: float = 1.5,
+    sl_atr_mult: float = 1.0,
+    neutral_if_no_hit: bool = True,
+) -> pd.DataFrame:
+    out = df.copy()
+    n = len(out)
+
+    targets = np.full(n, FLAT_CLASS, dtype=np.int64)
+    signed_ret = np.zeros(n, dtype=np.float64)
+
+    close = out["close"].to_numpy(dtype=np.float64)
+    high = out["high"].to_numpy(dtype=np.float64)
+    low = out["low"].to_numpy(dtype=np.float64)
+    atr = out["atr_14"].to_numpy(dtype=np.float64)
+
+    for i in range(n - horizon_bars):
+        entry = close[i]
+        if not np.isfinite(entry) or entry <= 0 or not np.isfinite(atr[i]) or atr[i] <= 0:
+            continue
+
+        tp = tp_atr_mult * atr[i]
+        sl = sl_atr_mult * atr[i]
+
+        buy_tp = entry + tp
+        buy_sl = entry - sl
+        sell_tp = entry - tp
+        sell_sl = entry + sl
+
+        buy_result = FLAT_CLASS
+        sell_result = FLAT_CLASS
+        buy_ret = 0.0
+        sell_ret = 0.0
+
+        for j in range(i + 1, i + horizon_bars + 1):
+            # BUY path
+            if buy_result == FLAT_CLASS:
+                if low[j] <= buy_sl:
+                    buy_result = SELL_CLASS
+                    buy_ret = -sl / entry
+                elif high[j] >= buy_tp:
+                    buy_result = BUY_CLASS
+                    buy_ret = tp / entry
+
+            # SELL path
+            if sell_result == FLAT_CLASS:
+                if high[j] >= sell_sl:
+                    sell_result = BUY_CLASS
+                    sell_ret = -sl / entry
+                elif low[j] <= sell_tp:
+                    sell_result = SELL_CLASS
+                    sell_ret = tp / entry
+
+            if buy_result != FLAT_CLASS or sell_result != FLAT_CLASS:
+                break
+
+        # choose label by first/stronger actionable outcome
+        if buy_result == BUY_CLASS and sell_result != SELL_CLASS:
+            targets[i] = BUY_CLASS
+            signed_ret[i] = buy_ret
+        elif sell_result == SELL_CLASS and buy_result != BUY_CLASS:
+            targets[i] = SELL_CLASS
+            signed_ret[i] = sell_ret
+        else:
+            if neutral_if_no_hit:
+                targets[i] = FLAT_CLASS
+                signed_ret[i] = 0.0
+            else:
+                fwd = close[i + horizon_bars] / entry - 1.0
+                if fwd > 0:
+                    targets[i] = BUY_CLASS
+                    signed_ret[i] = fwd
+                elif fwd < 0:
+                    targets[i] = SELL_CLASS
+                    signed_ret[i] = -fwd
+
+    out["target_class"] = targets
+    out["target_class_enc"] = out["target_class"].map(CLASS_TO_ENC).astype(np.int64)
+    out["fwd_ret_h"] = signed_ret
+    return out
+
+
 def build_features(df: pd.DataFrame, horizon_bars: int) -> pd.DataFrame:
     df = df.copy().sort_values("time").reset_index(drop=True)
     eps = 1e-12
@@ -172,10 +256,8 @@ def build_features(df: pd.DataFrame, horizon_bars: int) -> pd.DataFrame:
     df["range_pct_1"] = (df["high"] - df["low"]) / (df["close"] + eps)
     df["body_pct_1"] = (df["close"] - df["open"]) / (df["open"] + eps)
 
-    df["fwd_ret_h"] = df["close"].shift(-horizon_bars) / (df["close"] + eps) - 1.0
-
     df = df.replace([np.inf, -np.inf], np.nan)
-    df = df.dropna(subset=FEATURE_COLS + ["fwd_ret_h"]).copy()
+    df = df.dropna(subset=FEATURE_COLS + ["atr_14"]).copy()
     return df
 
 
@@ -241,21 +323,6 @@ def split_train_valid_test(
     test_df = pd.concat(test_parts, ignore_index=True)
 
     return train_df, valid_df, test_df
-
-
-def compute_return_barrier(train_df: pd.DataFrame, label_quantile: float) -> float:
-    barrier = float(train_df["fwd_ret_h"].abs().quantile(label_quantile))
-    return max(barrier, 1e-6)
-
-
-def label_targets(df: pd.DataFrame, return_barrier: float) -> pd.DataFrame:
-    out = df.copy()
-    out["target_class"] = FLAT_CLASS
-    out.loc[out["fwd_ret_h"] > return_barrier, "target_class"] = BUY_CLASS
-    out.loc[out["fwd_ret_h"] < -return_barrier, "target_class"] = SELL_CLASS
-    out["target_class"] = out["target_class"].astype(np.int64)
-    out["target_class_enc"] = out["target_class"].map(CLASS_TO_ENC).astype(np.int64)
-    return out
 
 
 def make_mlp(random_state: int = 42) -> Pipeline:
@@ -738,8 +805,18 @@ def walk_forward_report(train_df: pd.DataFrame, weights: Dict[str, float], label
         valid_df = train_df.iloc[valid_idx].copy()
 
         barrier = compute_return_barrier(fit_df, label_quantile)
-        fit_df = label_targets(fit_df, barrier)
-        valid_df = label_targets(valid_df, barrier)
+        fit_df = add_triple_barrier_target(
+            fit_df,
+            horizon_bars=args.horizon_bars,
+            tp_atr_mult=args.tp_atr_mult,
+            sl_atr_mult=args.sl_atr_mult,
+        )
+        valid_df = add_triple_barrier_target(
+            valid_df,
+            horizon_bars=args.horizon_bars,
+            tp_atr_mult=args.tp_atr_mult,
+            sl_atr_mult=args.sl_atr_mult,
+        )
 
         models = fit_models(fit_df, random_state=42 + fold)
         entry_prob_threshold, min_prob_gap = derive_decision_thresholds(models, fit_df, weights, prob_quantile, margin_quantile)
@@ -909,10 +986,24 @@ def main() -> None:
     print("\nWalk-forward summary:")
     print(json.dumps(walk_forward, indent=2))
 
-    barrier = compute_return_barrier(train_df, args.label_quantile)
-    train_lab = label_targets(train_df, barrier)
-    valid_lab = label_targets(valid_df, barrier)
-    test_lab  = label_targets(test_df, barrier)
+    train_lab = add_triple_barrier_target(
+        train_df,
+        horizon_bars=args.horizon_bars,
+        tp_atr_mult=args.tp_atr_mult,
+        sl_atr_mult=args.sl_atr_mult,
+    )
+    valid_lab = add_triple_barrier_target(
+        valid_df,
+        horizon_bars=args.horizon_bars,
+        tp_atr_mult=args.tp_atr_mult,
+        sl_atr_mult=args.sl_atr_mult,
+    )
+    test_lab = add_triple_barrier_target(
+        test_df,
+        horizon_bars=args.horizon_bars,
+        tp_atr_mult=args.tp_atr_mult,
+        sl_atr_mult=args.sl_atr_mult,
+    )
 
     models = fit_models(train_lab, random_state=42)
     
