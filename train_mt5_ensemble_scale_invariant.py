@@ -1008,7 +1008,16 @@ def main() -> None:
         tp_atr_mult=args.tp_atr_mult,
         sl_atr_mult=args.sl_atr_mult,
     )
-
+    
+    print("\nTRAIN TARGET DISTRIBUTION")
+    print(train_lab["target_class"].value_counts(normalize=True))
+    
+    print("\nVALID TARGET DISTRIBUTION")
+    print(valid_lab["target_class"].value_counts(normalize=True))
+    
+    print("\nTEST TARGET DISTRIBUTION")
+    print(test_lab["target_class"].value_counts(normalize=True))
+    
     models = fit_models(train_lab, random_state=42)
     
     compute_feature_importance(models, train_lab, output_dir)
