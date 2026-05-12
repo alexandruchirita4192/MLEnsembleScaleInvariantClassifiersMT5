@@ -894,7 +894,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--extratrees-weight", type=float, default=1.0 / 6.0)
     p.add_argument("--ridge-weight", type=float, default=1.0 / 6.0)
     p.add_argument("--naivebayes-weight", type=float, default=1.0 / 6.0)
-    p.add_argument("--target-mode", default="fixed", choices=["fixed", "triple-barrier"])
     p.add_argument("--tp-atr-mult", type=float, default=3.0)
     p.add_argument("--sl-atr-mult", type=float, default=1.0)
     return p.parse_args()
