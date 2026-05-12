@@ -1060,7 +1060,6 @@ def main() -> None:
         "label_quantile": args.label_quantile,
         "prob_quantile": args.prob_quantile,
         "margin_quantile": args.margin_quantile,
-        "barrier_abs_fwd_ret_h": barrier,
         "entry_prob_threshold": entry_prob_threshold,
         "min_prob_gap": min_prob_gap,
         "walk_forward": walk_forward,
