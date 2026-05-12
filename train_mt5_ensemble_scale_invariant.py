@@ -255,9 +255,12 @@ def build_features(df: pd.DataFrame, horizon_bars: int) -> pd.DataFrame:
     
     df["range_pct_1"] = (df["high"] - df["low"]) / (df["close"] + eps)
     df["body_pct_1"] = (df["close"] - df["open"]) / (df["open"] + eps)
-
+    
+    df["fwd_ret_h"] = df["close"].shift(-horizon_bars) / (df["close"] + eps) - 1.0
+    
     df = df.replace([np.inf, -np.inf], np.nan)
     df = df.dropna(subset=FEATURE_COLS + ["atr_14"]).copy()
+    df = df.dropna(subset=FEATURE_COLS + ["fwd_ret_h"]).copy()
     return df
 
 
@@ -787,8 +790,21 @@ def summarize_predictions(pred_df: pd.DataFrame) -> Dict[str, float]:
         "confusion_matrix_sell_flat_buy": confusion_matrix(y_true, y_pred, labels=CLASS_ORDER).tolist(),
     }
 
+def compute_return_barrier(train_df: pd.DataFrame, label_quantile: float) -> float:
+    barrier = float(train_df["fwd_ret_h"].abs().quantile(label_quantile))
+    return max(barrier, 1e-6)
 
-def walk_forward_report(train_df: pd.DataFrame, weights: Dict[str, float], label_quantile: float, prob_quantile: float, margin_quantile: float, n_splits: int, horizon_bars: int, tp_atr_mult: float, sl_atr_mult: float) -> Dict[str, float]:
+
+def label_targets(df: pd.DataFrame, return_barrier: float) -> pd.DataFrame:
+    out = df.copy()
+    out["target_class"] = FLAT_CLASS
+    out.loc[out["fwd_ret_h"] > return_barrier, "target_class"] = BUY_CLASS
+    out.loc[out["fwd_ret_h"] < -return_barrier, "target_class"] = SELL_CLASS
+    out["target_class"] = out["target_class"].astype(np.int64)
+    out["target_class_enc"] = out["target_class"].map(CLASS_TO_ENC).astype(np.int64)
+    return out
+
+def walk_forward_report(train_df: pd.DataFrame, weights: Dict[str, float], label_quantile: float, prob_quantile: float, margin_quantile: float, n_splits: int, horizon_bars: int, tp_atr_mult: float, sl_atr_mult: float, target_mode: string) -> Dict[str, float]:
     X = train_df[FEATURE_COLS].to_numpy(dtype=np.float32)
     tscv = TimeSeriesSplit(n_splits=n_splits)
 
@@ -804,18 +820,27 @@ def walk_forward_report(train_df: pd.DataFrame, weights: Dict[str, float], label
         fit_df = train_df.iloc[fit_idx].copy()
         valid_df = train_df.iloc[valid_idx].copy()
 
-        fit_df = add_triple_barrier_target(
-            fit_df,
-            horizon_bars=horizon_bars,
-            tp_atr_mult=tp_atr_mult,
-            sl_atr_mult=sl_atr_mult,
-        )
-        valid_df = add_triple_barrier_target(
-            valid_df,
-            horizon_bars=horizon_bars,
-            tp_atr_mult=tp_atr_mult,
-            sl_atr_mult=sl_atr_mult,
-        )
+        if target_mode == "fixed":
+            barrier = compute_return_barrier(
+                fit_df,
+                label_quantile
+            )
+            fit_df = label_targets(fit_df, barrier)
+            valid_df = label_targets(valid_df, barrier)
+            
+        elif target_mode == "triple-barrier":
+            fit_df = add_triple_barrier_target(
+                fit_df,
+                horizon_bars=horizon_bars,
+                tp_atr_mult=tp_atr_mult,
+                sl_atr_mult=sl_atr_mult,
+            )
+            valid_df = add_triple_barrier_target(
+                valid_df,
+                horizon_bars=horizon_bars,
+                tp_atr_mult=tp_atr_mult,
+                sl_atr_mult=sl_atr_mult,
+            )
 
         models = fit_models(fit_df, random_state=42 + fold)
         entry_prob_threshold, min_prob_gap = derive_decision_thresholds(models, fit_df, weights, prob_quantile, margin_quantile)
@@ -893,6 +918,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--extratrees-weight", type=float, default=1.0 / 6.0)
     p.add_argument("--ridge-weight", type=float, default=1.0 / 6.0)
     p.add_argument("--naivebayes-weight", type=float, default=1.0 / 6.0)
+    p.add_argument(
+        "--target-mode",
+        default="fixed",
+        choices=["fixed", "triple-barrier"]
+    )
     p.add_argument("--tp-atr-mult", type=float, default=3.0)
     p.add_argument("--sl-atr-mult", type=float, default=1.0)
     return p.parse_args()
@@ -985,29 +1015,37 @@ def main() -> None:
         n_splits=args.walk_forward_splits,
         horizon_bars=args.horizon_bars,
         tp_atr_mult=args.tp_atr_mult,
-        sl_atr_mult=args.sl_atr_mult
+        sl_atr_mult=args.sl_atr_mult,
+        target_mode=args.target_mode
     )
     print("\nWalk-forward summary:")
     print(json.dumps(walk_forward, indent=2))
-
-    train_lab = add_triple_barrier_target(
-        train_df,
-        horizon_bars=args.horizon_bars,
-        tp_atr_mult=args.tp_atr_mult,
-        sl_atr_mult=args.sl_atr_mult,
-    )
-    valid_lab = add_triple_barrier_target(
-        valid_df,
-        horizon_bars=args.horizon_bars,
-        tp_atr_mult=args.tp_atr_mult,
-        sl_atr_mult=args.sl_atr_mult,
-    )
-    test_lab = add_triple_barrier_target(
-        test_df,
-        horizon_bars=args.horizon_bars,
-        tp_atr_mult=args.tp_atr_mult,
-        sl_atr_mult=args.sl_atr_mult,
-    )
+    
+    if args.target_mode == "fixed":
+        barrier = compute_return_barrier(train_df, args.label_quantile)
+        train_lab = label_targets(train_df, barrier)
+        valid_lab = label_targets(valid_df, barrier)
+        test_lab  = label_targets(test_df, barrier)
+        
+    elif args.target_mode == "triple-barrier":
+        train_lab = add_triple_barrier_target(
+            train_df,
+            horizon_bars=args.horizon_bars,
+            tp_atr_mult=args.tp_atr_mult,
+            sl_atr_mult=args.sl_atr_mult,
+        )
+        valid_lab = add_triple_barrier_target(
+            valid_df,
+            horizon_bars=args.horizon_bars,
+            tp_atr_mult=args.tp_atr_mult,
+            sl_atr_mult=args.sl_atr_mult,
+        )
+        test_lab = add_triple_barrier_target(
+            test_df,
+            horizon_bars=args.horizon_bars,
+            tp_atr_mult=args.tp_atr_mult,
+            sl_atr_mult=args.sl_atr_mult,
+        )
     
     print("\nTRAIN TARGET DISTRIBUTION")
     print(train_lab["target_class"].value_counts(normalize=True))
