@@ -788,7 +788,7 @@ def summarize_predictions(pred_df: pd.DataFrame) -> Dict[str, float]:
     }
 
 
-def walk_forward_report(train_df: pd.DataFrame, weights: Dict[str, float], label_quantile: float, prob_quantile: float, margin_quantile: float, n_splits: int) -> Dict[str, float]:
+def walk_forward_report(train_df: pd.DataFrame, weights: Dict[str, float], label_quantile: float, prob_quantile: float, margin_quantile: float, n_splits: int, horizon_bars: int, tp_atr_mult: float, sl_atr_mult: float) -> Dict[str, float]:
     X = train_df[FEATURE_COLS].to_numpy(dtype=np.float32)
     tscv = TimeSeriesSplit(n_splits=n_splits)
 
@@ -806,15 +806,15 @@ def walk_forward_report(train_df: pd.DataFrame, weights: Dict[str, float], label
 
         fit_df = add_triple_barrier_target(
             fit_df,
-            horizon_bars=args.horizon_bars,
-            tp_atr_mult=args.tp_atr_mult,
-            sl_atr_mult=args.sl_atr_mult,
+            horizon_bars=horizon_bars,
+            tp_atr_mult=tp_atr_mult,
+            sl_atr_mult=sl_atr_mult,
         )
         valid_df = add_triple_barrier_target(
             valid_df,
-            horizon_bars=args.horizon_bars,
-            tp_atr_mult=args.tp_atr_mult,
-            sl_atr_mult=args.sl_atr_mult,
+            horizon_bars=horizon_bars,
+            tp_atr_mult=tp_atr_mult,
+            sl_atr_mult=sl_atr_mult,
         )
 
         models = fit_models(fit_df, random_state=42 + fold)
@@ -983,6 +983,9 @@ def main() -> None:
         prob_quantile=args.prob_quantile,
         margin_quantile=args.margin_quantile,
         n_splits=args.walk_forward_splits,
+        horizon_bars=args.horizon_bars,
+        tp_atr_mult=args.tp_atr_mult,
+        sl_atr_mult=args.sl_atr_mult
     )
     print("\nWalk-forward summary:")
     print(json.dumps(walk_forward, indent=2))
