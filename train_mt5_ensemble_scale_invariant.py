@@ -831,7 +831,7 @@ def walk_forward_report(train_df: pd.DataFrame, weights: Dict[str, float], label
         gap_thresholds.append(min_prob_gap)
 
         print(
-            f"Fold {fold}: barrier={barrier:.6f} entry_prob={entry_prob_threshold:.4f} "
+            f"Fold {fold}: entry_prob={entry_prob_threshold:.4f} "
             f"gap={min_prob_gap:.4f} accepted_rate={summary['accepted_rate']:.3f} "
             f"precision={summary['directional_precision_on_trades']:.3f} "
             f"mean_trade_ret={summary['mean_signed_fwd_return_on_trades']:.6f} "
@@ -1026,8 +1026,7 @@ def main() -> None:
     valid_summary = summarize_predictions(valid_pred)
     test_summary = summarize_predictions(test_pred)
 
-    print(f"\nLabel barrier abs(fwd_ret_h): {barrier:.8f}")
-    print(f"Recommended InpEntryProbThreshold: {entry_prob_threshold:.6f}")
+    print(f"\nRecommended InpEntryProbThreshold: {entry_prob_threshold:.6f}")
     print(f"Recommended InpMinProbGap:        {min_prob_gap:.6f}")
     
     print("\nTrain summary:")
