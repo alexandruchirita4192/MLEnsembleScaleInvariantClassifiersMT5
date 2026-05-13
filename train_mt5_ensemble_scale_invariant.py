@@ -132,6 +132,9 @@ def add_triple_barrier_target(
 
     targets = np.full(n, FLAT_CLASS, dtype=np.int64)
     signed_ret = np.zeros(n, dtype=np.float64)
+    raw_fwd_ret = np.zeros(n, dtype=np.float64)
+    tb_buy_ret = np.zeros(n, dtype=np.float64)
+    tb_sell_ret = np.zeros(n, dtype=np.float64)
 
     close = out["close"].to_numpy(dtype=np.float64)
     high = out["high"].to_numpy(dtype=np.float64)
@@ -153,54 +156,55 @@ def add_triple_barrier_target(
 
         buy_result = FLAT_CLASS
         sell_result = FLAT_CLASS
-        buy_ret = 0.0
-        sell_ret = 0.0
+        raw_fwd_ret[i] = close[i + horizon_bars] / entry - 1.0
 
         for j in range(i + 1, i + horizon_bars + 1):
             # BUY path
             if buy_result == FLAT_CLASS:
                 if low[j] <= buy_sl:
                     buy_result = SELL_CLASS
-                    buy_ret = -sl / entry
+                    tb_buy_ret[i] = -sl / entry
                 elif high[j] >= buy_tp:
                     buy_result = BUY_CLASS
-                    buy_ret = tp / entry
-
+                    tb_buy_ret[i] = tp / entry
+                    
             # SELL path
             if sell_result == FLAT_CLASS:
                 if high[j] >= sell_sl:
                     sell_result = BUY_CLASS
-                    sell_ret = -sl / entry
+                    tb_sell_ret[i] = -sl / entry
                 elif low[j] <= sell_tp:
                     sell_result = SELL_CLASS
-                    sell_ret = tp / entry
+                    tb_sell_ret[i] = tp / entry
 
             if buy_result != FLAT_CLASS or sell_result != FLAT_CLASS:
                 break
 
         # choose label by first/stronger actionable outcome
-        if buy_result == BUY_CLASS and sell_result != SELL_CLASS:
+        if buy_result == BUY_CLASS:
             targets[i] = BUY_CLASS
-            signed_ret[i] = buy_ret
-        elif sell_result == SELL_CLASS and buy_result != BUY_CLASS:
+            signed_ret[i] = tb_buy_ret[i]
+        elif sell_result == SELL_CLASS:
             targets[i] = SELL_CLASS
-            signed_ret[i] = sell_ret
+            signed_ret[i] = tb_sell_ret[i]
         else:
             if neutral_if_no_hit:
                 targets[i] = FLAT_CLASS
                 signed_ret[i] = 0.0
             else:
-                fwd = close[i + horizon_bars] / entry - 1.0
-                if fwd > 0:
+                if raw_fwd_ret[i] > 0:
                     targets[i] = BUY_CLASS
-                    signed_ret[i] = fwd
+                    signed_ret[i] = raw_fwd_ret[i]
                 elif fwd < 0:
                     targets[i] = SELL_CLASS
-                    signed_ret[i] = -fwd
+                    signed_ret[i] = -raw_fwd_ret[i]
 
+    out["signed_ret"] = signed_ret
+    out["fwd_ret_h"] = raw_fwd_ret
+    out["tb_buy_ret"] = tb_buy_ret
+    out["tb_sell_ret"] = tb_sell_ret
     out["target_class"] = targets
     out["target_class_enc"] = out["target_class"].map(CLASS_TO_ENC).astype(np.int64)
-    out["fwd_ret_h"] = signed_ret
     return out
 
 
@@ -752,7 +756,20 @@ def summarize_predictions(pred_df: pd.DataFrame) -> Dict[str, float]:
     y_true = pred_df["target_class"].to_numpy()
     y_pred = pred_df["pred_class"].to_numpy()
     trade_mask = pred_df["trade_taken"].to_numpy()
-
+    
+    if "tb_buy_ret" in pred_df.columns and "tb_sell_ret" in pred_df.columns:
+        signed_trade_ret = np.where(
+            pred_df.loc[trade_mask, "pred_class"].to_numpy() == BUY_CLASS,
+            pred_df.loc[trade_mask, "tb_buy_ret"].to_numpy(),
+            pred_df.loc[trade_mask, "tb_sell_ret"].to_numpy(),
+        )
+    else:
+        signed_trade_ret = np.where(
+            pred_df.loc[trade_mask, "pred_class"].to_numpy() == BUY_CLASS,
+            pred_df.loc[trade_mask, "fwd_ret_h"].to_numpy(),
+            -pred_df.loc[trade_mask, "fwd_ret_h"].to_numpy(),
+        )
+    
     if trade_mask.any():
         directional_precision = float(pred_df.loc[trade_mask, "direction_correct"].mean())
         signed_trade_ret = np.where(
