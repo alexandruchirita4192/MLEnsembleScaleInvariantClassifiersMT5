@@ -195,7 +195,7 @@ def add_triple_barrier_target(
                 if raw_fwd_ret[i] > 0:
                     targets[i] = BUY_CLASS
                     signed_ret[i] = raw_fwd_ret[i]
-                elif fwd < 0:
+                elif raw_fwd_ret[i] < 0:
                     targets[i] = SELL_CLASS
                     signed_ret[i] = -raw_fwd_ret[i]
 
