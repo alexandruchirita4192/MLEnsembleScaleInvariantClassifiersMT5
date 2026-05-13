@@ -177,7 +177,10 @@ def add_triple_barrier_target(
                     sell_result = SELL_CLASS
                     tb_sell_ret[i] = tp / entry
 
-            if buy_result != FLAT_CLASS or sell_result != FLAT_CLASS:
+            if (
+                buy_result != FLAT_CLASS
+                and sell_result != FLAT_CLASS
+            ):
                 break
 
         # choose label by first/stronger actionable outcome
