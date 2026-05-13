@@ -184,7 +184,7 @@ def add_triple_barrier_target(
                 break
 
         # choose label by first/stronger actionable outcome
-        if buy_result == BUY_CLASS:
+        if buy_result == BUY_CLASS: # Even though it has buy bias (buy preferred by default), it should have the same pips from current price until TP so performance is not affected
             targets[i] = BUY_CLASS
             signed_ret[i] = tb_buy_ret[i]
         elif sell_result == SELL_CLASS:
@@ -249,16 +249,16 @@ def build_features(df: pd.DataFrame, horizon_bars: int) -> pd.DataFrame:
     avg_gain = gain.rolling(14).mean()
     avg_loss = loss.rolling(14).mean()
     
-    rs = avg_gain / avg_loss
+    rs = avg_gain / (avg_loss + eps)
     df["rsi_14"] = 100 - (100 / (1 + rs))
     
     
     # ================= SMA 50 / 200 =================
     df["sma_50"] = df["close"].rolling(50).mean()
     df["sma_200"] = df["close"].rolling(200).mean()
-    df["dist_sma_50"] = df["close"] / df["sma_50"] - 1
-    df["dist_sma_200"] = df["close"] / df["sma_200"] - 1
-    df["sma_ratio_50_200"] = df["sma_50"] / df["sma_200"] - 1
+    df["dist_sma_50"] = df["close"] / (df["sma_50"] + eps) - 1
+    df["dist_sma_200"] = df["close"] / (df["sma_200"] + eps) - 1
+    df["sma_ratio_50_200"] = df["sma_50"] / (df["sma_200"] + eps) - 1
     
     df["range_pct_1"] = (df["high"] - df["low"]) / (df["close"] + eps)
     df["body_pct_1"] = (df["close"] - df["open"]) / (df["open"] + eps)
