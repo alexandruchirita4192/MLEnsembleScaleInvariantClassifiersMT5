@@ -819,7 +819,7 @@ def label_targets(df: pd.DataFrame, return_barrier: float) -> pd.DataFrame:
     out["target_class_enc"] = out["target_class"].map(CLASS_TO_ENC).astype(np.int64)
     return out
 
-def walk_forward_report(train_df: pd.DataFrame, weights: Dict[str, float], label_quantile: float, prob_quantile: float, margin_quantile: float, n_splits: int, horizon_bars: int, tp_atr_mult: float, sl_atr_mult: float, target_mode: string) -> Dict[str, float]:
+def walk_forward_report(train_df: pd.DataFrame, weights: Dict[str, float], label_quantile: float, prob_quantile: float, margin_quantile: float, n_splits: int, horizon_bars: int, tp_atr_mult: float, sl_atr_mult: float, target_mode: str) -> Dict[str, float]:
     X = train_df[FEATURE_COLS].to_numpy(dtype=np.float32)
     tscv = TimeSeriesSplit(n_splits=n_splits)
 
