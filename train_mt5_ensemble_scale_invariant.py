@@ -772,11 +772,6 @@ def summarize_predictions(pred_df: pd.DataFrame) -> Dict[str, float]:
     
     if trade_mask.any():
         directional_precision = float(pred_df.loc[trade_mask, "direction_correct"].mean())
-        signed_trade_ret = np.where(
-            pred_df.loc[trade_mask, "pred_class"].to_numpy() == BUY_CLASS,
-            pred_df.loc[trade_mask, "fwd_ret_h"].to_numpy(),
-            -pred_df.loc[trade_mask, "fwd_ret_h"].to_numpy(),
-        )
         mean_trade_return = float(signed_trade_ret.mean())
         accepted_trades = int(trade_mask.sum())
         accepted_rate = float(trade_mask.mean())
