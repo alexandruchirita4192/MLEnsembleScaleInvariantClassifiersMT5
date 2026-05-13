@@ -21,7 +21,6 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from skl2onnx import convert_sklearn
 from skl2onnx.common.data_types import FloatTensorType as SklFloatTensorType
-from sklearn.inspection import permutation_importance
 
 try:
     import MetaTrader5 as mt5
@@ -131,7 +130,7 @@ def add_triple_barrier_target(
     n = len(out)
 
     targets = np.full(n, FLAT_CLASS, dtype=np.int64)
-    signed_ret = np.zeros(n, dtype=np.float64)
+    trade_ret = np.zeros(n, dtype=np.float64)
     raw_fwd_ret = np.zeros(n, dtype=np.float64)
     tb_buy_ret = np.zeros(n, dtype=np.float64)
     tb_sell_ret = np.zeros(n, dtype=np.float64)
@@ -186,23 +185,23 @@ def add_triple_barrier_target(
         # choose label by first/stronger actionable outcome
         if buy_result == BUY_CLASS: # Even though it has buy bias (buy preferred by default), it should have the same pips from current price until TP so performance is not affected
             targets[i] = BUY_CLASS
-            signed_ret[i] = tb_buy_ret[i]
+            trade_ret[i] = tb_buy_ret[i]
         elif sell_result == SELL_CLASS:
             targets[i] = SELL_CLASS
-            signed_ret[i] = tb_sell_ret[i]
+            trade_ret[i] = tb_sell_ret[i]
         else:
             if neutral_if_no_hit:
                 targets[i] = FLAT_CLASS
-                signed_ret[i] = 0.0
+                trade_ret[i] = 0.0
             else:
                 if raw_fwd_ret[i] > 0:
                     targets[i] = BUY_CLASS
-                    signed_ret[i] = raw_fwd_ret[i]
+                    trade_ret[i] = raw_fwd_ret[i]
                 elif raw_fwd_ret[i] < 0:
                     targets[i] = SELL_CLASS
-                    signed_ret[i] = -raw_fwd_ret[i]
+                    trade_ret[i] = -raw_fwd_ret[i]
 
-    out["signed_ret"] = signed_ret
+    out["trade_ret"] = trade_ret
     out["fwd_ret_h"] = raw_fwd_ret
     out["tb_buy_ret"] = tb_buy_ret
     out["tb_sell_ret"] = tb_sell_ret
@@ -547,7 +546,7 @@ def compute_permutation_importance(models, train_df, weights, output_dir):
 
     def ensemble_predict(X_input):
         proba = weighted_probabilities(models, X_input, weights)
-        return np.argmax(proba, axis=1)
+        return np.argmax(proba, axis=1).astype(np.int64)
 
     # baseline
     base_pred = ensemble_predict(X)
@@ -944,7 +943,15 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    np.random.seed(42)
     args = parse_args()
+    
+    if args.csv and args.multi_symbol_csv.strip():
+        raise ValueError(
+            "Do not combine --csv with --multi-symbol-csv. "
+            "Use MT5 fetching or implement per-symbol CSV loading."
+        )
+    
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -964,7 +971,7 @@ def main() -> None:
     # ==========================================
     # BUILD SYMBOL LIST
     # ==========================================
-    
+
     if args.multi_symbol_csv.strip():
         symbols = [
             s.strip()
