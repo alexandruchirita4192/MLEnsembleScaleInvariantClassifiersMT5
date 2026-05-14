@@ -2,7 +2,7 @@
 //| Ensemble Scale-Invariant Professional             Copyright 2026 |
 //+------------------------------------------------------------------+
 #property strict
-#property version "1.4"
+#property version "1.41"
 #property description "MT5 EA: professional scale-invariant ONNX ensemble (MLP + LightGBM + HGB + ExtraTrees + Ridge + NaiveBayes)"
 #property description "Crypto-aware adaptive spread guard, support/resistance skipping, trend confirmation"
 
@@ -487,12 +487,10 @@ bool BuildFeatureVector(matrixf &features, double &atr14_raw)
    MqlRates rates[];
    ArraySetAsSeries(rates, true);
 
-   int copied = CopyRates(_Symbol, _Period, 0, 80, rates);
-   if(copied < 40)
+   int copied = CopyRates(_Symbol, _Period, 0, 230, rates);
+   if(copied < 220)
      {
-      LogInfo(
-         "BuildFeatureVector failed: not enough bars from CopyRates (need >= "
-         "40).");
+      LogInfo("BuildFeatureVector failed: not enough bars from CopyRates (need >= 220).");
       return false;
      }
 
@@ -557,37 +555,28 @@ bool BuildFeatureVector(matrixf &features, double &atr14_raw)
    double gain=0, loss=0;
    for(int i=1;i<=14;i++)
      {
-      double diff = iClose(_Symbol, PERIOD_M15, i-1) - iClose(_Symbol, PERIOD_M15, i);
+      double diff = closes[i] - closes[i + 1];
       if(diff > 0)
          gain += diff;
       else
          loss -= diff;
      }
 
-   double rs = gain / (loss + 1e-8);
+   double avg_gain = gain / 14.0;
+   double avg_loss = loss / 14.0;
+   double rs = avg_gain / (avg_loss + eps);
    double rsi_14 = 100.0 - (100.0 / (1.0 + rs));
 
 
 // === SMA 50 / 200 ===
-   double sma50=0, sma200=0;
 
-   for(int i=0;i<50;i++)
-      sma50 += iClose(_Symbol, PERIOD_M15, i);
+   double sma50 = Mean(closes, s, 50);
+   double sma200 = Mean(closes, s, 200);
 
-   for(int i=0;i<200;i++)
-      sma200 += iClose(_Symbol, PERIOD_M15, i);
+   double sma_ratio_50_200 = (sma50 / (sma200 + eps)) - 1.0;
+   double dist_sma_50 = (c / (sma50 + eps)) - 1.0;
+   double dist_sma_200 = (c / (sma200 + eps)) - 1.0;
 
-   sma50 /= 50;
-   sma200 /= 200;
-
-// sma_ratio_50_200
-   double sma_ratio_50_200 = sma50 / sma200 - 1.0;
-
-// dist_sma_50
-   double dist_sma_50 = iClose(_Symbol, PERIOD_M15, 0) / sma50 - 1.0;
-
-// dist_sma_200
-   double dist_sma_200 = iClose(_Symbol, PERIOD_M15, 0) / sma200 - 1.0;
 
    features.Resize(1, FEATURE_COUNT);
    features[0][0] = (float)ret_1;
@@ -607,7 +596,7 @@ bool BuildFeatureVector(matrixf &features, double &atr14_raw)
    features[0][14] = (float)sma_ratio_50_200;
    features[0][15] = (float)dist_sma_50;
    features[0][16] = (float)dist_sma_200;
-   
+
    return true;
   }
 
@@ -1133,16 +1122,31 @@ bool EntryGuardsAllow(double atr14_raw)
 //+------------------------------------------------------------------+
 SignalDirection GetTrend()
   {
-   double sma50 = iMA(_Symbol, PERIOD_M15, 50, 0, MODE_SMA, PRICE_CLOSE);
-   double sma200 = iMA(_Symbol, PERIOD_M15, 200, 0, MODE_SMA, PRICE_CLOSE);
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+
+   int copied = CopyRates(_Symbol, _Period, 0, 230, rates);
+   if(copied < 220)
+      return SIGNAL_FLAT;
+
+   double closes[];
+   ArrayResize(closes, copied);
+   ArraySetAsSeries(closes, true);
+
+   for(int i = 0; i < copied; i++)
+      closes[i] = rates[i].close;
+
+   int s = 1;
+   double sma50 = Mean(closes, s, 50);
+   double sma200 = Mean(closes, s, 200);
 
    if(sma50 > sma200)
-      return SIGNAL_BUY;   // uptrend
+      return SIGNAL_BUY;
 
    if(sma50 < sma200)
-      return SIGNAL_SELL;  // downtrend
+      return SIGNAL_SELL;
 
-   return SIGNAL_FLAT;      // flat
+   return SIGNAL_FLAT;
   }
 
 //+------------------------------------------------------------------+
@@ -1150,8 +1154,8 @@ SignalDirection GetTrend()
 //+------------------------------------------------------------------+
 double GetResistance(int period=50)
   {
-   int index = iHighest(_Symbol, PERIOD_M15, MODE_HIGH, period, 1);
-   return iHigh(_Symbol, PERIOD_M15, index);
+   int index = iHighest(_Symbol, _Period, MODE_HIGH, period, 1);
+   return iHigh(_Symbol, _Period, index);
   }
 
 //+------------------------------------------------------------------+
@@ -1159,8 +1163,8 @@ double GetResistance(int period=50)
 //+------------------------------------------------------------------+
 double GetSupport(int period=50)
   {
-   int index = iLowest(_Symbol, PERIOD_M15, MODE_LOW, period, 1);
-   return iLow(_Symbol, PERIOD_M15, index);
+   int index = iLowest(_Symbol, _Period, MODE_LOW, period, 1);
+   return iLow(_Symbol, _Period, index);
   }
 
 //+------------------------------------------------------------------+
@@ -1168,7 +1172,14 @@ double GetSupport(int period=50)
 //+------------------------------------------------------------------+
 double GetATR()
   {
-   return iATR(_Symbol, PERIOD_M15, 14);
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+
+   int copied = CopyRates(_Symbol, _Period, 0, 30, rates);
+   if(copied < 20)
+      return 0.0;
+
+   return CalcATR(rates, 1, 14);
   }
 
 //+------------------------------------------------------------------+
@@ -1176,7 +1187,7 @@ double GetATR()
 //+------------------------------------------------------------------+
 bool IsBreakoutBuy(double resistance)
   {
-   double close0 = iClose(_Symbol, PERIOD_M15, 0);
+   double close0 = iClose(_Symbol, _Period, 0);
    return close0 > resistance;
   }
 
@@ -1185,7 +1196,7 @@ bool IsBreakoutBuy(double resistance)
 //+------------------------------------------------------------------+
 bool IsBreakoutSell(double support)
   {
-   double close0 = iClose(_Symbol, PERIOD_M15, 0);
+   double close0 = iClose(_Symbol, _Period, 0);
    return close0 < support;
   }
 
@@ -1194,7 +1205,7 @@ bool IsBreakoutSell(double support)
 //+------------------------------------------------------------------+
 bool IsStrongBreakoutBuy(double atr, double resistance)
   {
-   double close0 = iClose(_Symbol, PERIOD_M15, 0);
+   double close0 = iClose(_Symbol, _Period, 0);
    return close0 > resistance + 0.5 * atr;
   }
 
@@ -1203,7 +1214,7 @@ bool IsStrongBreakoutBuy(double atr, double resistance)
 //+------------------------------------------------------------------+
 bool IsStrongBreakoutSell(double atr, double support)
   {
-   double close0 = iClose(_Symbol, PERIOD_M15, 0);
+   double close0 = iClose(_Symbol, _Period, 0);
    return close0 < support - 0.5 * atr;
   }
 
