@@ -846,7 +846,6 @@ def label_targets(df: pd.DataFrame, return_barrier: float) -> pd.DataFrame:
 
 def walk_forward_report(train_df: pd.DataFrame, weights: Dict[str, float], label_quantile: float, prob_quantile: float, margin_quantile: float, n_splits: int, horizon_bars: int, tp_atr_mult: float, sl_atr_mult: float, target_mode: str, neutral_if_no_hit: bool = True) -> Dict[str, float]:    X = train_df[FEATURE_COLS].to_numpy(dtype=np.float32)
     tscv = TimeSeriesSplit(n_splits=n_splits, gap=horizon_bars)
-
     accepted_rates: List[float] = []
     directional_precisions: List[float] = []
     mean_trade_returns: List[float] = []
