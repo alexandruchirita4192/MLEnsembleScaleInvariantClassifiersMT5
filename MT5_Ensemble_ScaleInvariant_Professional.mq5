@@ -567,7 +567,6 @@ bool BuildFeatureVector(matrixf &features, double &atr14_raw)
    double rs = avg_gain / (avg_loss + eps);
    double rsi_14 = 100.0 - (100.0 / (1.0 + rs));
 
-
 // === SMA 50 / 200 ===
 
    double sma50 = Mean(closes, s, 50);
@@ -576,7 +575,6 @@ bool BuildFeatureVector(matrixf &features, double &atr14_raw)
    double sma_ratio_50_200 = (sma50 / (sma200 + eps)) - 1.0;
    double dist_sma_50 = (c / (sma50 + eps)) - 1.0;
    double dist_sma_200 = (c / (sma200 + eps)) - 1.0;
-
 
    features.Resize(1, FEATURE_COUNT);
    features[0][0] = (float)ret_1;
