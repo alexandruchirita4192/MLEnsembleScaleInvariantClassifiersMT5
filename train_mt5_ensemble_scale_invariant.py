@@ -53,8 +53,8 @@ FEATURE_COLS = [
     "sma_ratio_50_200",
     "dist_sma_50",
     "dist_sma_200",
-    "session_asia"
-    "session_london"
+    "session_asia",
+    "session_london",
     "session_newyork"
 ]
 
