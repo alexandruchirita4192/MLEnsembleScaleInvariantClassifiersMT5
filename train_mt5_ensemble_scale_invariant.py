@@ -189,10 +189,10 @@ def add_triple_barrier_target(
                 break
 
         # choose label by first/stronger actionable outcome
-        if buy_result == BUY_CLASS and buy_hit_step < sell_hit_step: # Even though it has buy bias (buy preferred by default), it should have the same pips from current price until TP so performance is not affected
+        if buy_result == BUY_CLASS and buy_hit_step <= sell_hit_step: # Even though it has buy bias (buy preferred by default), it should have the same pips from current price until TP so performance is not affected
             targets[i] = BUY_CLASS
             trade_ret[i] = tb_buy_ret[i]
-        elif sell_result == SELL_CLASS and sell_hit_step < buy_hit_step:
+        elif sell_result == SELL_CLASS:
             targets[i] = SELL_CLASS
             trade_ret[i] = tb_sell_ret[i]
         else:
@@ -369,6 +369,7 @@ def make_lgbm(random_state: int = 42) -> LGBMClassifier:
         random_state=random_state,
         n_jobs=-1,
         verbosity=-1,
+        class_weight="balanced"
     )
 
 
@@ -409,6 +410,7 @@ def make_extratrees(random_state: int = 42) -> ExtraTreesClassifier:
         bootstrap=False,
         random_state=random_state,
         n_jobs=-1,
+        class_weight="balanced_subsample"
     )
 
 
@@ -824,9 +826,8 @@ def label_targets(df: pd.DataFrame, return_barrier: float) -> pd.DataFrame:
     out["target_class_enc"] = out["target_class"].map(CLASS_TO_ENC).astype(np.int64)
     return out
 
-def walk_forward_report(train_df: pd.DataFrame, weights: Dict[str, float], label_quantile: float, prob_quantile: float, margin_quantile: float, n_splits: int, horizon_bars: int, tp_atr_mult: float, sl_atr_mult: float, target_mode: str) -> Dict[str, float]:
-    X = train_df[FEATURE_COLS].to_numpy(dtype=np.float32)
-    tscv = TimeSeriesSplit(n_splits=n_splits)
+def walk_forward_report(train_df: pd.DataFrame, weights: Dict[str, float], label_quantile: float, prob_quantile: float, margin_quantile: float, n_splits: int, horizon_bars: int, tp_atr_mult: float, sl_atr_mult: float, target_mode: str, neutral_if_no_hit: bool = True) -> Dict[str, float]:    X = train_df[FEATURE_COLS].to_numpy(dtype=np.float32)
+    tscv = TimeSeriesSplit(n_splits=n_splits, gap=horizon_bars)
 
     accepted_rates: List[float] = []
     directional_precisions: List[float] = []
@@ -854,12 +855,14 @@ def walk_forward_report(train_df: pd.DataFrame, weights: Dict[str, float], label
                 horizon_bars=horizon_bars,
                 tp_atr_mult=tp_atr_mult,
                 sl_atr_mult=sl_atr_mult,
+                neutral_if_no_hit=neutral_if_no_hit
             )
             valid_df = add_triple_barrier_target(
                 valid_df,
                 horizon_bars=horizon_bars,
                 tp_atr_mult=tp_atr_mult,
                 sl_atr_mult=sl_atr_mult,
+                neutral_if_no_hit=neutral_if_no_hit
             )
 
         models = fit_models(fit_df, random_state=42 + fold)
@@ -945,6 +948,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--tp-atr-mult", type=float, default=3.0)
     p.add_argument("--sl-atr-mult", type=float, default=1.0)
+    p.add_argument("--neutral-if-no-hit", type=bool, default=True)
     return p.parse_args()
 
 
@@ -1044,7 +1048,8 @@ def main() -> None:
         horizon_bars=args.horizon_bars,
         tp_atr_mult=args.tp_atr_mult,
         sl_atr_mult=args.sl_atr_mult,
-        target_mode=args.target_mode
+        target_mode=args.target_mode,
+        neutral_if_no_hit=args.neutral_if_no_hit
     )
     print("\nWalk-forward summary:")
     print(json.dumps(walk_forward, indent=2))
@@ -1061,18 +1066,21 @@ def main() -> None:
             horizon_bars=args.horizon_bars,
             tp_atr_mult=args.tp_atr_mult,
             sl_atr_mult=args.sl_atr_mult,
+            neutral_if_no_hit=args.neutral_if_no_hit
         )
         valid_lab = add_triple_barrier_target(
             valid_df,
             horizon_bars=args.horizon_bars,
             tp_atr_mult=args.tp_atr_mult,
             sl_atr_mult=args.sl_atr_mult,
+            neutral_if_no_hit=args.neutral_if_no_hit
         )
         test_lab = add_triple_barrier_target(
             test_df,
             horizon_bars=args.horizon_bars,
             tp_atr_mult=args.tp_atr_mult,
             sl_atr_mult=args.sl_atr_mult,
+            neutral_if_no_hit=args.neutral_if_no_hit
         )
     
     print("\nTRAIN TARGET DISTRIBUTION")
