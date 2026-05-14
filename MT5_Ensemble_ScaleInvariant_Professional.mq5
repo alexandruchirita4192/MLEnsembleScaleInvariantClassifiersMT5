@@ -2,7 +2,7 @@
 //| Ensemble Scale-Invariant Professional             Copyright 2026 |
 //+------------------------------------------------------------------+
 #property strict
-#property version "1.41"
+#property version "1.42"
 #property description "MT5 EA: professional scale-invariant ONNX ensemble (MLP + LightGBM + HGB + ExtraTrees + Ridge + NaiveBayes)"
 #property description "Crypto-aware adaptive spread guard, support/resistance skipping, trend confirmation"
 
