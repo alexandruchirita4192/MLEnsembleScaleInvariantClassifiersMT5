@@ -156,25 +156,31 @@ def add_triple_barrier_target(
         buy_result = FLAT_CLASS
         sell_result = FLAT_CLASS
         raw_fwd_ret[i] = close[i + horizon_bars] / entry - 1.0
-
+        buy_hit_step = 999999
+        sell_hit_step = 999999
+        
         for j in range(i + 1, i + horizon_bars + 1):
             # BUY path
             if buy_result == FLAT_CLASS:
                 if low[j] <= buy_sl:
                     buy_result = SELL_CLASS
                     tb_buy_ret[i] = -sl / entry
+                    buy_hit_step = j
                 elif high[j] >= buy_tp:
                     buy_result = BUY_CLASS
                     tb_buy_ret[i] = tp / entry
+                    buy_hit_step = j
                     
             # SELL path
             if sell_result == FLAT_CLASS:
                 if high[j] >= sell_sl:
                     sell_result = BUY_CLASS
                     tb_sell_ret[i] = -sl / entry
+                    sell_hit_step = j
                 elif low[j] <= sell_tp:
                     sell_result = SELL_CLASS
                     tb_sell_ret[i] = tp / entry
+                    sell_hit_step = j
 
             if (
                 buy_result != FLAT_CLASS
@@ -183,10 +189,10 @@ def add_triple_barrier_target(
                 break
 
         # choose label by first/stronger actionable outcome
-        if buy_result == BUY_CLASS: # Even though it has buy bias (buy preferred by default), it should have the same pips from current price until TP so performance is not affected
+        if buy_result == BUY_CLASS and buy_hit_step < sell_hit_step: # Even though it has buy bias (buy preferred by default), it should have the same pips from current price until TP so performance is not affected
             targets[i] = BUY_CLASS
             trade_ret[i] = tb_buy_ret[i]
-        elif sell_result == SELL_CLASS:
+        elif sell_result == SELL_CLASS and sell_hit_step < buy_hit_step:
             targets[i] = SELL_CLASS
             trade_ret[i] = tb_sell_ret[i]
         else:
