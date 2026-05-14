@@ -180,10 +180,11 @@ bool BuildFeatureVector(matrixf &features, double &atr14_raw)
   {
    MqlRates rates[];
    ArraySetAsSeries(rates, true);
-   int copied = CopyRates(_Symbol, _Period, 0, 80, rates);
-   if(copied < 40)
+
+   int copied = CopyRates(_Symbol, _Period, 0, 230, rates);
+   if(copied < 220)
      {
-      LogInfo("BuildFeatureVector failed: not enough bars from CopyRates.");
+      LogInfo("BuildFeatureVector failed: not enough bars from CopyRates (need >= 220).");
       return false;
      }
 
@@ -224,7 +225,9 @@ bool BuildFeatureVector(matrixf &features, double &atr14_raw)
    double sma_20 = Mean(closes, s, 20);
    if(sma_10 == 0.0 || sma_20 == 0.0)
      {
-      LogInfo("BuildFeatureVector failed: SMA10 or SMA20 equals zero.");
+      LogInfo(
+         "BuildFeatureVector failed: SMA10 or SMA20 equals zero, cannot compute "
+         "normalized features.");
       return false;
      }
 
@@ -246,36 +249,26 @@ bool BuildFeatureVector(matrixf &features, double &atr14_raw)
    double gain=0, loss=0;
    for(int i=1;i<=14;i++)
      {
-      double diff = iClose(_Symbol, PERIOD_M15, i-1) - iClose(_Symbol, PERIOD_M15, i);
+      double diff = closes[i] - closes[i + 1];
       if(diff > 0)
          gain += diff;
       else
          loss -= diff;
      }
 
-   double rs = gain / (loss + 1e-8);
+   double avg_gain = gain / 14.0;
+   double avg_loss = loss / 14.0;
+   double rs = avg_gain / (avg_loss + eps);
    double rsi_14 = 100.0 - (100.0 / (1.0 + rs));
 
 // === SMA 50 / 200 ===
-   double sma50=0, sma200=0;
 
-   for(int i=0;i<50;i++)
-      sma50 += iClose(_Symbol, PERIOD_M15, i);
+   double sma50 = Mean(closes, s, 50);
+   double sma200 = Mean(closes, s, 200);
 
-   for(int i=0;i<200;i++)
-      sma200 += iClose(_Symbol, PERIOD_M15, i);
-
-   sma50 /= 50;
-   sma200 /= 200;
-
-// sma_ratio_50_200
-   double sma_ratio_50_200 = sma50 / sma200 - 1.0;
-
-// dist_sma_50
-   double dist_sma_50 = iClose(_Symbol, PERIOD_M15, 0) / sma50 - 1.0;
-
-// dist_sma_200
-   double dist_sma_200 = iClose(_Symbol, PERIOD_M15, 0) / sma200 - 1.0;
+   double sma_ratio_50_200 = (sma50 / (sma200 + eps)) - 1.0;
+   double dist_sma_50 = (c / (sma50 + eps)) - 1.0;
+   double dist_sma_200 = (c / (sma200 + eps)) - 1.0;
 
    features.Resize(1, FEATURE_COUNT);
    features[0][0] = (float)ret_1;
@@ -295,6 +288,7 @@ bool BuildFeatureVector(matrixf &features, double &atr14_raw)
    features[0][14] = (float)sma_ratio_50_200;
    features[0][15] = (float)dist_sma_50;
    features[0][16] = (float)dist_sma_200;
+
    return true;
   }
 
