@@ -2,7 +2,7 @@
 //| Ensemble Scale-Invariant Strategy                 Copyright 2026 |
 //+------------------------------------------------------------------+
 #property strict
-#property version "1.4"
+#property version "1.41"
 #property description "MT5 EA: scale-invariant ONNX ensemble (MLP + LightGBM + HGB + ExtraTrees + Ridge + NaiveBayes)"
 
 #include <Trade/Trade.mqh>
