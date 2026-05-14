@@ -53,6 +53,9 @@ FEATURE_COLS = [
     "sma_ratio_50_200",
     "dist_sma_50",
     "dist_sma_200",
+    "session_asia"
+    "session_london"
+    "session_newyork"
 ]
 
 
@@ -270,9 +273,24 @@ def build_features(df: pd.DataFrame, horizon_bars: int) -> pd.DataFrame:
     
     df["fwd_ret_h"] = df["close"].shift(-horizon_bars) / (df["close"] + eps) - 1.0
     
+    hour = df["time"].dt.hour
+
+    df["session_asia"] = (
+        (hour >= 0) & (hour < 8)
+    ).astype(np.float32)
+    
+    df["session_london"] = (
+        (hour >= 7) & (hour < 16)
+    ).astype(np.float32)
+    
+    df["session_newyork"] = (
+        (hour >= 13) & (hour < 22)
+    ).astype(np.float32)
+    
     df = df.replace([np.inf, -np.inf], np.nan)
     df = df.dropna(subset=FEATURE_COLS + ["atr_14"]).copy()
     df = df.dropna(subset=FEATURE_COLS + ["fwd_ret_h"]).copy()
+
     return df
 
 
