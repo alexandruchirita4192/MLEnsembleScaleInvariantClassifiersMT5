@@ -216,6 +216,7 @@ def add_triple_barrier_target(
     out["tb_sell_ret"] = tb_sell_ret
     out["target_class"] = targets
     out["target_class_enc"] = out["target_class"].map(CLASS_TO_ENC).astype(np.int64)
+    out = out.iloc[:-horizon_bars].copy()
     return out
 
 
