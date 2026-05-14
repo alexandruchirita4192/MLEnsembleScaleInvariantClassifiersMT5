@@ -18,9 +18,9 @@
 input double InpBaseLots = 0.10;
 input bool InpUseConfidenceSizing = true;
 input double InpMinLotMultiplier = 0.50;
-input double InpMaxLotMultiplier = 1.50;
+input double InpMaxLotMultiplier = 3.00;
 
-input double InpEntryProbThreshold = 0.60;
+input double InpEntryProbThreshold = 0.50;
 input double InpMinProbGap = 0.15;
 input bool InpUseAtrStops = true;
 input double InpStopAtrMultiple = 1.00;
@@ -78,7 +78,7 @@ input long InpMagic = 26042026;
 input bool InpLog = false;
 input bool InpDebugLog = false;
 
-const int FEATURE_COUNT = 17;
+const int FEATURE_COUNT = 20;
 const int CLASS_COUNT = 3;
 const long EXT_INPUT_SHAPE[] = {1, FEATURE_COUNT};
 const long EXT_LABEL_SHAPE[] = {1};
@@ -576,6 +576,23 @@ bool BuildFeatureVector(matrixf &features, double &atr14_raw)
    double dist_sma_50 = (c / (sma50 + eps)) - 1.0;
    double dist_sma_200 = (c / (sma200 + eps)) - 1.0;
 
+   datetime bar_time = rates[s].time;
+   MqlDateTime dt;
+   TimeToStruct(bar_time, dt);
+
+   double session_asia = 0.0;
+   double session_london = 0.0;
+   double session_newyork = 0.0;
+
+   if(dt.hour >= 0 && dt.hour < 8)
+      session_asia = 1.0;
+
+   if(dt.hour >= 7 && dt.hour < 16)
+      session_london = 1.0;
+
+   if(dt.hour >= 13 && dt.hour < 22)
+      session_newyork = 1.0;
+
    features.Resize(1, FEATURE_COUNT);
    features[0][0] = (float)ret_1;
    features[0][1] = (float)ret_3;
@@ -594,6 +611,9 @@ bool BuildFeatureVector(matrixf &features, double &atr14_raw)
    features[0][14] = (float)sma_ratio_50_200;
    features[0][15] = (float)dist_sma_50;
    features[0][16] = (float)dist_sma_200;
+   features[0][17] = (float)session_asia;
+   features[0][18] = (float)session_london;
+   features[0][19] = (float)session_newyork;
 
    return true;
   }
