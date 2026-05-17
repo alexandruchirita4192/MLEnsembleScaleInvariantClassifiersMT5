@@ -2,7 +2,7 @@
 //| Ensemble Scale-Invariant Professional             Copyright 2026 |
 //+------------------------------------------------------------------+
 #property strict
-#property version "1.42"
+#property version "1.43"
 #property description "MT5 EA: professional scale-invariant ONNX ensemble (MLP + LightGBM + HGB + ExtraTrees + Ridge + NaiveBayes)"
 #property description "Crypto-aware adaptive spread guard, support/resistance skipping, trend confirmation"
 
@@ -63,10 +63,11 @@ input double InpDailyLossLimitMoney = 25.0;
 input bool InpDailyLossFlatOnTrigger = true;
 
 input bool InpUseTrend = true;
-input bool InpUseSupportAndResistance = true;
+input bool InpUseSupportAndResistance = false;
 input double InpSupportAndResistanceBuffer = 0.002; // InpSupportAndResistanceBuffer=0.2%
 input bool InpUseBreakout = true;
 input bool InpUseStrongBreakout = true;
+input bool InpBreakoutMeansReversalOfTrend = true;
 
 input bool InpUseVolumeFilter = false;
 input double InpMinVolume = 0.001;
@@ -1201,39 +1202,73 @@ double GetATR()
   }
 
 //+------------------------------------------------------------------+
-//| IsBreakoutBuy                                                    |
+//| IsResistanceBreakout                                             |
 //+------------------------------------------------------------------+
-bool IsBreakoutBuy(double resistance)
+SignalDirection IsResistanceBreakout(double resistance)
   {
    double close0 = iClose(_Symbol, _Period, 0);
-   return close0 > resistance;
+
+   if(close0 <= resistance)
+      return SIGNAL_FLAT;
+
+   if(InpBreakoutMeansReversalOfTrend)
+      return SIGNAL_SELL;
+
+   return SIGNAL_BUY;
   }
 
 //+------------------------------------------------------------------+
-//| IsBreakoutSell                                                   |
+//| IsSupportBreakout                                                |
 //+------------------------------------------------------------------+
-bool IsBreakoutSell(double support)
+SignalDirection IsSupportBreakout(double support)
   {
    double close0 = iClose(_Symbol, _Period, 0);
-   return close0 < support;
+
+   if(close0 >= support)
+      return SIGNAL_FLAT;
+
+   if(InpBreakoutMeansReversalOfTrend)
+      return SIGNAL_BUY;
+
+   return SIGNAL_SELL;
   }
 
 //+------------------------------------------------------------------+
-//| IsStrongBreakoutBuy                                              |
+//| IsStrongResistanceBreakout                                       |
 //+------------------------------------------------------------------+
-bool IsStrongBreakoutBuy(double atr, double resistance)
+SignalDirection IsStrongResistanceBreakout(
+   double atr,
+   double resistance
+)
   {
    double close0 = iClose(_Symbol, _Period, 0);
-   return close0 > resistance + 0.5 * atr;
+
+   if(close0 <= resistance + 0.5 * atr)
+      return SIGNAL_FLAT;
+
+   if(InpBreakoutMeansReversalOfTrend)
+      return SIGNAL_SELL;
+
+   return SIGNAL_BUY;
   }
 
 //+------------------------------------------------------------------+
-//| IsStrongBreakoutSell                                             |
+//| IsStrongSupportBreakout                                          |
 //+------------------------------------------------------------------+
-bool IsStrongBreakoutSell(double atr, double support)
+SignalDirection IsStrongSupportBreakout(
+   double atr,
+   double support
+)
   {
    double close0 = iClose(_Symbol, _Period, 0);
-   return close0 < support - 0.5 * atr;
+
+   if(close0 >= support - 0.5 * atr)
+      return SIGNAL_FLAT;
+
+   if(InpBreakoutMeansReversalOfTrend)
+      return SIGNAL_BUY;
+
+   return SIGNAL_SELL;
   }
 
 //+------------------------------------------------------------------+
@@ -1427,20 +1462,35 @@ void OnTick()
 
       double resistance = GetResistance(50);
       double support = GetSupport(50);
-      bool isBuyBreakout = InpUseBreakout && IsBreakoutBuy(resistance);
-      bool isSellBreakout = InpUseBreakout && IsBreakoutSell(support);
-      bool isBuyStrongBreakout = InpUseStrongBreakout && IsStrongBreakoutBuy(atr, resistance);
-      bool isSellStrongBreakout = InpUseStrongBreakout && IsStrongBreakoutSell(atr, support);
+
+      SignalDirection signal = SIGNAL_FLAT;
+      SignalDirection breakout_signal = IsResistanceBreakout(resistance);
+
+      if(InpUseBreakout && breakout_signal != SIGNAL_FLAT)
+         signal = breakout_signal;
+      breakout_signal = IsSupportBreakout(support);
+
+      if(InpUseBreakout && breakout_signal != SIGNAL_FLAT)
+         signal = breakout_signal;
+
+      breakout_signal = IsStrongResistanceBreakout(atr, resistance);
+
+      if(InpUseStrongBreakout && breakout_signal != SIGNAL_FLAT)
+         signal = breakout_signal;
+      breakout_signal = IsStrongSupportBreakout(atr, support);
+
+      if(InpUseStrongBreakout && breakout_signal != SIGNAL_FLAT)
+         signal = breakout_signal;
 
       // block BUY near resistance (except BUY breakout & strong BUY breakout)
-      if(info.signal == SIGNAL_BUY && price > resistance * (1 - InpSupportAndResistanceBuffer) && !isBuyBreakout && !isBuyStrongBreakout)
+      if(info.signal == SIGNAL_BUY && price > resistance * (1 - InpSupportAndResistanceBuffer) && signal != SIGNAL_BUY)
         {
          LogDebug("OnTick: skipping entry, skipping buy near resistance.");
          return;
         }
 
       // block SELL near support (except SELL breakout & strong SELL breakout)
-      if(info.signal == SIGNAL_SELL && price < support * (1 + InpSupportAndResistanceBuffer) && !isSellBreakout && !isSellStrongBreakout)
+      if(info.signal == SIGNAL_SELL && price < support * (1 + InpSupportAndResistanceBuffer) && signal != SIGNAL_SELL)
         {
          LogDebug("OnTick: skipping entry, skipping sell near support.");
          return;
